@@ -219,6 +219,10 @@ class TestParseReading:
             _body(math.nan),
             _body(math.inf),
             _body("1700000000"),  # type: ignore[arg-type]
+            _body(0.0),
+            _body(-1e12),
+            _body(1e20),
+            _body(NOW + 2 * HOUR),
         ],
     )
     def test_invalid_body_is_no_reading(self, body):
@@ -340,6 +344,21 @@ class TestUsageEntry:
         now = time.time()
         _write_reading(cache, _body(now + 120))
         assert usage_entry(_setup_creds(), now).age_s == 0.0
+
+    @pytest.mark.parametrize("captured_at", [1e20, -1e12])
+    def test_out_of_range_capture_is_pending_and_projects(self, cache, captured_at):
+        """A corrupt capture time must not reach the JSON timestamp
+        projection, which cannot represent it."""
+        from claude_swap.json_output import usage_freshness_fields
+
+        _write_reading(cache, _body(captured_at, five=(50, None), seven=None))
+        entry = usage_entry(_setup_creds(), time.time())
+        assert entry.sentinel == USAGE_STATUSLINE_PENDING
+        assert entry.fetched_at is None
+        assert usage_fields(entry.decision_value(), entry.fetched_at)[0] == (
+            "statusline_pending"
+        )
+        assert usage_freshness_fields(entry.fetched_at, entry.age_s) == {}
 
     def test_no_reading_is_pending(self, cache):
         entry = usage_entry(_setup_creds(), time.time())
@@ -588,6 +607,53 @@ class TestCollectorNeverFetches:
         assert fleet._usage_store.entries(identity)["2"].token_dead()  # PREMISE
         assert fleet._slot_token_dead("2", SETUP_EMAIL) is False
 
+    @pytest.mark.parametrize("with_reading", [True, False])
+    def test_oauth_slot_with_drifted_live_setup_token_keeps_oauth_path(
+        self, fleet, cache, with_reading
+    ):
+        """The config names OAuth slot 1 but the live store holds slot 2's
+        setup-token (a switch killed between its two writes, or an external
+        tool). Slot 1 is not reclassified: it keeps the fetch path, whose
+        refusal fails over and so repairs the drift, instead of holding on
+        pending forever or serving slot 2's reading as its own."""
+        now = time.time()
+        if with_reading:
+            _write_reading(cache, _body(now - 60, five=(20, now + HOUR)))
+        _make_live(OAUTH_EMAIL, _setup_creds(), "uuid-1")
+        info = fleet._build_accounts_info()
+        assert info[0][4] and info[0][5] == _setup_creds()  # PREMISE: drifted
+        with _NetworkSpy(fleet) as spy:
+            entries = fleet._collect_usage_entries(info)
+        assert spy.fetched == [OAUTH_EMAIL]
+        assert entries["1"].source is None
+        assert entries["2"].source == STATUSLINE_SOURCE
+
+    def test_slot_token_dead_honors_a_strike_on_a_drifted_oauth_slot(self, fleet):
+        _make_live(OAUTH_EMAIL, _setup_creds(), "uuid-1")
+        identity = _identity(fleet, "1")
+        fleet._usage_store.record(
+            {"1": FetchRecord(
+                error="no_refresh_token",
+                struck_fp=oauth.credential_fingerprint(_setup_creds()),
+            )},
+            identity,
+        )
+        assert fleet._usage_store.entries(identity)["1"].token_dead()  # PREMISE
+        assert fleet._slot_token_dead("1", OAUTH_EMAIL) is True
+
+    def test_active_setup_token_with_unreadable_backup_stays_statusline(
+        self, fleet, cache
+    ):
+        now = time.time()
+        _write_reading(cache, _body(now - 60, five=(20, now + HOUR)))
+        _make_live(SETUP_EMAIL, _setup_creds())
+        with patch.object(
+            fleet, "_read_account_credentials_ex", return_value=("", True)
+        ), _NetworkSpy(fleet) as spy:
+            entries = fleet._collect_usage_entries(fleet._build_accounts_info())
+        assert spy.fetched == [OAUTH_EMAIL]
+        assert entries["2"].decision_value()["five_hour"]["pct"] == 20.0
+
     def test_accesstoken_only_oauth_blob_is_still_fetched(self, temp_home, cache):
         """The stand-in shape many fixtures use for an OAuth login (no
         scopes) keeps the usage-endpoint path."""
@@ -734,7 +800,9 @@ class TestSwitchStrategies:
 
 
 class TestImportUsage:
-    def test_setup_token_rows_are_skipped(self, fleet, temp_home, capsys):
+    def test_setup_token_rows_adopt_without_effect(self, fleet, temp_home, capsys):
+        """No credential is read to tell the slots apart (a Keychain read on
+        macOS); the adopted row is simply never served for a setup-token."""
         from claude_swap.transfer import import_usage
 
         resets = _iso(time.time() + HOUR).replace("+00:00", "Z")
@@ -750,11 +818,19 @@ class TestImportUsage:
         path.write_text(json.dumps({
             "schemaVersion": 1, "activeAccountNumber": None, "accounts": rows,
         }), encoding="utf-8")
-        import_usage(fleet, str(path))
+        with patch.object(
+            fleet, "_read_account_credentials",
+            side_effect=AssertionError("credential read"),
+        ), patch.object(
+            fleet, "_read_account_credentials_ex",
+            side_effect=AssertionError("credential read"),
+        ):
+            import_usage(fleet, str(path), hold_s=600)
 
         err = capsys.readouterr().err
-        assert f"Adopted usage for {OAUTH_EMAIL} → slot 1" in err
-        assert "Skipped slot 2" in err and "statusline" in err
-        assert "Done: 1 adopted, 0 kept, 1 skipped" in err
-        stored = fleet._usage_store.entries(_identity(fleet, "2"))["2"]
-        assert stored.last_good is None
+        assert "Done: 2 adopted, 0 kept, 0 skipped" in err
+        with _NetworkSpy(fleet) as spy:
+            entries = fleet._collect_usage_entries(fleet._build_accounts_info())
+        assert spy.fetched == []  # slot 1 held for the adopted reading
+        assert entries["1"].decision_value()["five_hour"]["pct"] == 11.0
+        assert entries["2"].decision_value() == USAGE_STATUSLINE_PENDING

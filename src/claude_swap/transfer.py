@@ -24,7 +24,7 @@ from claude_swap.fsutil import atomic_write_text
 from claude_swap.json_output import SCHEMA_VERSION as JSON_SCHEMA_VERSION
 from claude_swap.json_output import usage_from_json
 from claude_swap.models import Platform, get_timestamp, normalize_alias
-from claude_swap.oauth import credential_fingerprint, is_setup_token_credential
+from claude_swap.oauth import credential_fingerprint
 
 if TYPE_CHECKING:
     from claude_swap.switcher import ClaudeAccountSwitcher
@@ -655,12 +655,13 @@ def import_usage(
     Each row with decision-grade usage (``usageStatus`` "ok") is matched to a
     local slot by (email, organizationUuid), the key ``import`` uses, and
     handed to :meth:`UsageStore.adopt` with ``usageAgeSeconds`` as its age.
-    Rows without usage, and accounts not managed here, are skipped. So are
-    setup-token slots: their usage is served only from this machine's
-    statusline cache (see ``statusline_usage``), which would shadow an
-    adopted reading anyway. With ``hold_s``, no local collector fetches the
-    matched accounts for that long (bounded; see ``adopt``); 0 lifts an
-    earlier hold, ``None`` keeps it.
+    Rows without usage, and accounts not managed here, are skipped. A
+    setup-token slot adopts like any other, but to no effect: its usage is
+    served only from this machine's statusline cache (see
+    ``statusline_usage``), never from the stored row, and it is never
+    fetched, so a hold has nothing to pause. With ``hold_s``, no local
+    collector fetches the matched accounts for that long (bounded; see
+    ``adopt``); 0 lifts an earlier hold, ``None`` keeps it.
 
     Args:
         switcher: Initialized ClaudeAccountSwitcher.
@@ -729,13 +730,6 @@ def import_usage(
                 f"duplicate account in usage document: {email} "
                 f"(org={org_uuid or 'personal'})"
             )
-        if is_setup_token_credential(switcher._read_account_credentials(num, email)):
-            _eprint(
-                f"Skipped slot {num} ({email}): a setup-token's usage comes "
-                "from this machine's statusline cache"
-            )
-            skipped += 1
-            continue
         readings[num] = (usage, float(age_s))
         identities[num] = (email, org_uuid)
 

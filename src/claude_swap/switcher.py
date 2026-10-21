@@ -5229,13 +5229,10 @@ class ClaudeAccountSwitcher:
             static = self._static_usage_sentinel(info)
             if static is not None:
                 sentinels[num] = static
-        # Classified on info[5]: the live credential for the active slot, the
-        # backup otherwise. A setup-token never rotates, so either copy (and a
-        # session profile's) names the same cache file.
         statusline = {
             num
             for num, info in info_by_num.items()
-            if num not in sentinels and oauth.is_setup_token_credential(info[5])
+            if num not in sentinels and self._is_statusline_slot(info)
         }
 
         entries = store.entries(identities, models)
@@ -5356,6 +5353,33 @@ class ClaudeAccountSwitcher:
                 )
         return collected
 
+    def _is_statusline_slot(
+        self,
+        info: tuple[int, str, str, str, bool, str, str],
+        backup: str | None = None,
+    ) -> bool:
+        """Is this a setup-token slot, whose usage comes from the statusline
+        cache instead of the usage endpoint?
+
+        Classified on ``info[5]``: the live credential for the active slot,
+        the backup otherwise. A setup-token never rotates, so either copy (and
+        a session profile's) names the same cache file. The active slot must
+        ALSO have a setup-token backup (``backup``, read here when not given;
+        an unreadable one cannot disprove it): a refreshable slot whose live
+        store drifted to another slot's setup-token keeps the OAuth path, whose
+        refused fetch fails over and so repairs the drift.
+        """
+        num, email, _org_name, _org_uuid, is_active, creds, _alias = info
+        if not oauth.is_setup_token_credential(creds):
+            return False
+        if not is_active:
+            return True
+        if backup is None:
+            backup, unreadable = self._read_account_credentials_ex(str(num), email)
+            if unreadable:
+                return True
+        return oauth.is_setup_token_credential(backup)
+
     def _slot_token_dead(self, num: str, email: str) -> bool:
         """Is this slot quarantined as refresh-token-dead, right now?
 
@@ -5411,7 +5435,9 @@ class ClaudeAccountSwitcher:
             stored = active_value
         else:
             stored = backup
-        if oauth.is_setup_token_credential(stored):
+        if self._is_statusline_slot(
+            (int(num), email, "", org, is_active, stored, ""), backup
+        ):
             # The collectors never strike a setup-token slot (it is read from
             # the statusline cache, not fetched), so a strike row left from
             # before is no quarantine to heal: replacing the slot without

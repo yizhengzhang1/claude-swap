@@ -489,6 +489,37 @@ class TestSnapshotSource:
         assert usage.fetched_at == 200.0
         assert usage.last_good["five_hour"]["pct"] == 80.0
 
+    def test_statusline_entry_is_never_kept_from_the_previous_pass(self, tmp_path):
+        """Rebuilt from the cache on every pass: a pending entry (token
+        swapped under the same slot, file gone) or an older capture replaces
+        the previous reading instead of freezing it on the card."""
+        from claude_swap.json_output import USAGE_STATUSLINE_PENDING
+        from claude_swap.usage_store import STATUSLINE_SOURCE
+
+        def reading(fetched_at, pct):
+            return dataclasses.replace(
+                make_usage_at(fetched_at, pct=pct), source=STATUSLINE_SOURCE
+            )
+
+        shown = make_account(2, entry=reading(200.0, 90.0))
+        pending = make_account(2, entry=UsageEntry(
+            sentinel=USAGE_STATUSLINE_PENDING, source=STATUSLINE_SOURCE,
+        ))
+        older = make_account(2, entry=reading(100.0, 10.0))
+        fake, source = self._source(tmp_path, [shown])
+
+        source.take()
+        fake._accounts = [pending]
+        usage = source.take(store_only=True).accounts[0].usage
+        assert usage.sentinel == USAGE_STATUSLINE_PENDING
+        assert usage.last_good is None
+        fake._accounts = [shown]
+        source.take(store_only=True)
+        fake._accounts = [older]
+        usage = source.take(store_only=True).accounts[0].usage
+        assert usage.fetched_at == 100.0
+        assert usage.last_good["five_hour"]["pct"] == 10.0
+
 
 class TestUsageRows:
     """The card's rows must mirror the CLI's _format_usage_lines semantics."""

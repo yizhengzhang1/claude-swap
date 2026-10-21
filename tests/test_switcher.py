@@ -15,7 +15,11 @@ import pytest
 
 from claude_swap import macos_keychain
 from claude_swap import oauth
-from claude_swap.json_output import USAGE_FOREIGN_CREDENTIAL, USAGE_TOKEN_EXPIRED
+from claude_swap.json_output import (
+    USAGE_FOREIGN_CREDENTIAL,
+    USAGE_STATUSLINE_PENDING,
+    USAGE_TOKEN_EXPIRED,
+)
 from claude_swap.exceptions import (
     AccountNotFoundError,
     ConfigError,
@@ -25,7 +29,12 @@ from claude_swap.exceptions import (
     SwitchError,
     ValidationError,
 )
-from claude_swap.usage_store import FetchRecord, UsageEntry, UsageStore
+from claude_swap.usage_store import (
+    STATUSLINE_SOURCE,
+    FetchRecord,
+    UsageEntry,
+    UsageStore,
+)
 from claude_swap.macos_keychain import KeychainError
 from claude_swap.models import Platform, normalize_alias
 from claude_swap.paths import get_backup_root, get_credentials_path
@@ -1491,17 +1500,15 @@ class TestSetupTokenHeaderProbeWiring:
             switcher._collect_usage_entries([self._info()], fetch)
         assert len(urls) == 2
 
-    def test_probe_off_sends_no_request_and_says_why(self, temp_home: Path):
+    def test_probe_off_reads_the_statusline_and_sends_no_request(self, temp_home: Path):
         switcher = ClaudeAccountSwitcher()
         switcher._setup_directories()
         with patch.object(switcher, "_live_session_pids", return_value=[]), \
              patch("claude_swap.oauth.urllib.request.urlopen") as urlopen:
             entry = switcher._collect_usage_entries([self._info()])["3"]
         urlopen.assert_not_called()
-        assert entry.last_good is None
-        assert entry.last_error == "setup-token"
-        lines = _usage_entry_lines(entry)
-        assert "usage.headerProbe true" in lines[0]
+        assert entry.source == STATUSLINE_SOURCE
+        assert entry.decision_value() == USAGE_STATUSLINE_PENDING
 
     def test_partial_and_rejected_readings_stay_visible(self):
         partial = {"five_hour": {"pct": 5.0}, "source": oauth.USAGE_SOURCE_HEADERS}

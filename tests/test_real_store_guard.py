@@ -453,6 +453,27 @@ def test_frozen_specs_include_the_ambient_xdg_override_backup_root(
     )
 
 
+def test_frozen_specs_include_the_statusline_usage_cache(monkeypatch, tmp_path):
+    """The Claude Code statusline's usage cache holds a statusline user's
+    real readings, and statusline tests write cache files: its default root
+    is protected even for a developer who exports either variable that
+    relocates it, and so is the relocated one."""
+    home = tmp_path / "home"
+    (home / ".claude").mkdir(parents=True)
+    state = tmp_path / "state-outside-home"
+    override = tmp_path / "usage-override"
+    monkeypatch.setattr("pathlib.Path.home", lambda: home)
+    monkeypatch.setenv("XDG_STATE_HOME", str(state))
+    monkeypatch.setenv("CLAUDE_USAGE_CACHE_DIR", str(override))
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+
+    specs = conftest._freeze_real_store_specs()
+    recursive_roots = {root for root, recursive in specs if recursive}
+
+    assert home / ".local" / "state" / "claude-usage" in recursive_roots
+    assert override in recursive_roots
+
+
 def test_layout_a_runtime_real_store_is_refused_and_unrelated_tmp_still_writes(
     monkeypatch, tmp_path
 ):

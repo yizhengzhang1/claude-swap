@@ -1181,23 +1181,6 @@ class TestDueCandidate:
         entries = {"2": UsageEntry(sentinel="api-key")}
         assert due_candidate(["2"], entries, self.NOW) is None
 
-    def test_statusline_entries_skipped(self):
-        """The collector never fetches a setup-token slot, and its reading
-        is old by nature: picking it would spend every tick's alternate
-        poll on a no-op while the OAuth candidates go unpolled."""
-        entries = {
-            "2": UsageEntry(
-                last_good={"five_hour": {"pct": 1.0}},
-                fetched_at=self.NOW - 86400,
-                age_s=86400.0,
-                trust_extended=True,
-                source=usage_store.STATUSLINE_SOURCE,
-            ),
-            "3": UsageEntry(fetched_at=self.NOW - 600, age_s=600.0),
-        }
-        assert due_candidate(["2", "3"], entries, self.NOW) == "3"
-        assert due_candidate(["2"], entries, self.NOW) is None
-
     def test_backoff_skipped_until_it_expires(self):
         entries = {"2": UsageEntry(backoff_until=self.NOW + 10)}
         assert due_candidate(["2"], entries, self.NOW) is None

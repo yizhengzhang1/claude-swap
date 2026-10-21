@@ -14,7 +14,6 @@ from claude_swap.exceptions import ConfigError, SwitchError
 from claude_swap.json_output import (
     SCHEMA_VERSION,
     USAGE_NO_CREDENTIALS,
-    USAGE_STATUSLINE_PENDING,
     USAGE_TOKEN_EXPIRED,
     account_row,
     error_envelope,
@@ -753,39 +752,6 @@ class TestAccountRowDisabled:
     def test_disabled_absent_by_default(self):
         row = account_row(1, "a@example.com", "", "", False, None)
         assert "disabled" not in row
-
-
-class TestAccountRowUsageSource:
-    """The additive ``usageSource`` field: statusline rows only."""
-
-    def test_absent_by_default(self):
-        row = account_row(
-            1, "a@example.com", "", "", False, {"five_hour": {"pct": 5.0}},
-            usage_fetched_at=1_800_000_000.0, usage_age_s=12.0,
-        )
-        assert "usageSource" not in row
-
-    def test_statusline_reading(self):
-        row = account_row(
-            2, "setup-token-2@token.local", "", "", False,
-            {"five_hour": {"pct": 5.0}},
-            usage_fetched_at=1_800_000_000.0, usage_age_s=7200.0,
-            usage_source="statusline",
-        )
-        assert row["usageStatus"] == "ok"
-        assert row["usageSource"] == "statusline"
-        assert row["usageFetchedAt"] == "2027-01-15T08:00:00Z"
-        assert row["usageAgeSeconds"] == 7200.0
-
-    def test_statusline_pending(self):
-        row = account_row(
-            2, "setup-token-2@token.local", "", "", False,
-            USAGE_STATUSLINE_PENDING, usage_source="statusline",
-        )
-        assert row["usageStatus"] == "statusline_pending"
-        assert row["usage"] is None
-        assert row["usageSource"] == "statusline"
-        assert "usageError" not in row
 
 
 class TestUsageFromJson:

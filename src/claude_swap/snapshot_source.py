@@ -22,7 +22,7 @@ from dataclasses import replace
 from claude_swap.json_output import USAGE_TOKEN_EXPIRED
 from claude_swap.models import AccountSnapshot, AccountsSnapshot
 from claude_swap.switcher import ClaudeAccountSwitcher
-from claude_swap.usage_store import UsageEntry
+from claude_swap.usage_store import STATUSLINE_SOURCE, UsageEntry
 
 _logger = logging.getLogger("claude-swap")
 
@@ -91,7 +91,15 @@ class SnapshotSource:
 
         prev_fetched = prev.usage.fetched_at
         fetched = acc.usage.fetched_at
-        if prev_fetched is not None and (fetched is None or fetched < prev_fetched):
+        # A statusline entry is rebuilt from the cache on every pass, so the
+        # new one is authoritative: a token swapped in under the same slot, or
+        # a file gone missing, must not keep showing the previous reading.
+        statusline = STATUSLINE_SOURCE in (acc.usage.source, prev.usage.source)
+        if (
+            not statusline
+            and prev_fetched is not None
+            and (fetched is None or fetched < prev_fetched)
+        ):
             return replace(acc, usage=_with_current_age(prev.usage, taken_at))
         if acc.usage.sentinel is not None:
             return acc

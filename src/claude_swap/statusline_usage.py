@@ -147,7 +147,10 @@ def parse_reading(body: object, now: float) -> StatuslineReading:
     if body.get("source") != _BODY_SOURCE:
         return _NO_READING
     captured_at = body.get("captured_at")
-    if not _finite(captured_at):
+    # Beyond the clock-drift slack in the future, or before the epoch, the
+    # capture time is corrupt: it would read as "just now" at any real age,
+    # or fail every timestamp projection downstream.
+    if not _finite(captured_at) or not 0 < captured_at <= now + _RESET_SLACK_S:
         return _NO_READING
     captured_at = float(captured_at)
     raw: dict = {}

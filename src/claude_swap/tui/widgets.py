@@ -15,16 +15,20 @@ from rich.text import Text
 from textual.widgets import ListItem, Static
 
 from claude_swap import pace
-from claude_swap.json_output import USAGE_API_KEY
+from claude_swap.json_output import USAGE_API_KEY, USAGE_STATUSLINE_PENDING
 from claude_swap.models import AccountSnapshot
 from claude_swap.oauth import FIVE_HOUR_LABEL
 from claude_swap.switcher import ERROR_NOTES
-from claude_swap.usage_store import STALE_OK_S
+from claude_swap.usage_store import STALE_OK_S, STATUSLINE_SOURCE, UsageEntry
 from claude_swap.tui import data
 from claude_swap.tui.theme import Palette
 
 if TYPE_CHECKING:
     from claude_swap.tui.app import CswapApp
+
+# Sentinel states that are informational, not a problem: rendered muted with
+# a "·" marker instead of a "⚠" warning.
+_MUTED_SENTINELS = (USAGE_API_KEY, USAGE_STATUSLINE_PENDING)
 
 _BAR_FILLED = "━"
 _BAR_HALF = "╸"
@@ -101,6 +105,16 @@ def _reset_parts(window: dict, now: float) -> tuple[str | None, str | None]:
         return None, None
     clock = data.reset_clock(window, now)
     return reset, f"{reset} · {clock}" if clock else reset
+
+
+def _stale(usage: UsageEntry) -> bool:
+    """Whether bars dim as stale. Statusline readings never do: they drive
+    decisions at any age, and the source note already shows how old."""
+    return (
+        usage.source != STATUSLINE_SOURCE
+        and usage.age_s is not None
+        and usage.age_s > STALE_OK_S
+    )
 
 
 def _pace_suffix(window: dict, fetched_at: float | None) -> str:
@@ -208,15 +222,16 @@ def account_card_text(
         text.append("   (disabled)", style=palette.muted)
     for badge in _policy_badges(acc, "   "):
         text.append(badge, style=palette.muted)
-    age = data.format_age(acc.usage.age_s)
+    age = data.statusline_note(acc.usage) or data.format_age(acc.usage.age_s)
     if age:
         text.append(f"   {age}", style=palette.muted)
 
     sentinel = acc.usage.sentinel
     if sentinel is not None:
         text.append("\n    ")
-        style = palette.muted if sentinel == USAGE_API_KEY else palette.sev_warn
-        marker = "·" if sentinel == USAGE_API_KEY else "⚠"
+        muted = sentinel in _MUTED_SENTINELS
+        style = palette.muted if muted else palette.sev_warn
+        marker = "·" if muted else "⚠"
         text.append(f"{marker} {data.sentinel_label(sentinel)}", style=style)
         # Same supplementary line `cswap list` prints: the last good
         # measurement behind the sentinel (API-key accounts have no quota to
@@ -240,7 +255,7 @@ def account_card_text(
             text.append(f" · {note}", style=palette.muted)
         return text
 
-    stale = acc.usage.age_s is not None and acc.usage.age_s > STALE_OK_S
+    stale = _stale(acc.usage)
     label_width = max(len(label) for label, _pct, _suffix, _full in rows)
     bar_width = max(12, min(30, width - 42 - label_width))
     # everything on a row except the suffix: indent, label, bar, " NNN%", gap
@@ -296,13 +311,13 @@ def mini_account_text(
 
     sentinel = acc.usage.sentinel
     if sentinel is not None:
-        style = palette.muted if sentinel == USAGE_API_KEY else palette.sev_warn
+        style = palette.muted if sentinel in _MUTED_SENTINELS else palette.sev_warn
         text.append(data.sentinel_label(sentinel), style=style)
         return text
 
     last_good = acc.usage.last_good
     fetched_at = acc.usage.fetched_at
-    stale = acc.usage.age_s is not None and acc.usage.age_s > STALE_OK_S
+    stale = _stale(acc.usage)
     parts = 0
     for key, label in (("five_hour", "5h"), ("seven_day", "7d")):
         window = last_good.get(key) if isinstance(last_good, dict) else None
@@ -335,6 +350,9 @@ def mini_account_text(
         parts += 1
     if not parts:
         text.append("usage unknown", style=palette.muted)
+    note = data.statusline_note(acc.usage)
+    if note:
+        text.append(f"  {note}", style=palette.muted)
     return text
 
 

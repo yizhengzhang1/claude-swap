@@ -42,6 +42,11 @@ USAGE_RELOGIN_REQUIRED = "re-login needed"
 # (stash the foreign credential, restore the slot's backup), so autoswitch
 # should treat the active as unknown-headroom and fail over.
 USAGE_FOREIGN_CREDENTIAL = "foreign credential"
+# A setup-token slot whose usage comes from the Claude Code statusline cache
+# (see ``statusline_usage``) has no reading there yet: nothing has rendered a
+# statusline with that token, or the file is unreadable. Not "no credentials"
+# — the slot has one, and re-adding it would change nothing.
+USAGE_STATUSLINE_PENDING = "awaiting statusline"
 
 
 def _window_to_json(entry: dict) -> dict:
@@ -222,8 +227,13 @@ def usage_fields(
     ``USAGE_KEYCHAIN_UNAVAILABLE`` sentinel (active Keychain unreadable), the
     ``USAGE_FOREIGN_CREDENTIAL`` sentinel (live credential proven to belong to
     another account; usage suppressed, a switch repairs the drift), the
-    ``USAGE_NO_CREDENTIALS`` sentinel, or ``None`` (fetch failed). ``fetched_at``
-    is forwarded to ``usage_to_json`` for the weekly pace fields (issue #125).
+    ``USAGE_STATUSLINE_PENDING`` sentinel (setup-token slot with no statusline
+    reading yet), the ``USAGE_NO_CREDENTIALS`` sentinel, or ``None`` (no
+    decision-grade reading). A dict is always decision-grade: an API
+    measurement recent enough to act on (``usage_store.STALE_OK_S``, or
+    extended trust), or a statusline reading, which stays trusted at any age
+    because its windows roll to 0% at their reset. ``fetched_at`` is forwarded
+    to ``usage_to_json`` for the weekly pace fields (issue #125).
     """
     if isinstance(entry, dict):
         return "ok", usage_to_json(entry, fetched_at)
@@ -237,6 +247,8 @@ def usage_fields(
         return "relogin_required", None
     if entry == USAGE_FOREIGN_CREDENTIAL:
         return "foreign_credential", None
+    if entry == USAGE_STATUSLINE_PENDING:
+        return "statusline_pending", None
     if isinstance(entry, str):
         return "no_credentials", None
     return "unavailable", None
@@ -320,9 +332,12 @@ def account_row(
     disabled: bool = False,
     policy: AccountPolicy = AccountPolicy(),
     login_expires_at: str | None = None,
+    usage_source: str | None = None,
 ) -> dict:
     """A full account row for ``--list``. ``backoff_until`` is the live
-    backoff only; a lapsed one is the caller's to withhold."""
+    backoff only; a lapsed one is the caller's to withhold. ``usage_source``
+    is ``"statusline"`` for a setup-token slot read from the statusline
+    cache (``UsageEntry.source``), ``None`` for the usage API."""
     status, usage = usage_fields(usage_entry, usage_fetched_at)
     row = {
         "number": number,
@@ -359,6 +374,10 @@ def account_row(
             )
         )
         row.update(usage_failure_fields(status, last_error, backoff_until))
+    # Additive, statusline rows only: rows read from the usage API stay
+    # byte-identical to those from before the field existed.
+    if usage_source:
+        row["usageSource"] = usage_source
     return row
 
 

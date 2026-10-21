@@ -236,6 +236,10 @@ PERMANENT_AUTH_ERRORS = frozenset({"invalid_grant", "no_refresh_token"})
 # (email, organizationUuid) — the identity a slot number currently maps to.
 Identity = tuple[str, str]
 
+# ``UsageEntry.source`` of a setup-token slot read from the Claude Code
+# statusline cache (``statusline_usage``) rather than from this table.
+STATUSLINE_SOURCE = "statusline"
+
 
 @dataclass(frozen=True)
 class FetchRecord:
@@ -314,6 +318,11 @@ class UsageEntry:
     # import-usage``) keeps every collector off this slot. Appended for the
     # same positional compatibility as ``claim_until``.
     held_until: float | None = None
+    # ``STATUSLINE_SOURCE`` for a setup-token slot, whose entry the collector
+    # builds from the Claude Code statusline cache instead of this table
+    # (see ``statusline_usage``); ``None`` for every row read from here.
+    # Appended for the same positional compatibility.
+    source: str | None = None
 
     def fresh(self, now: float, ttl: float = SERVE_TTL_S) -> bool:
         return self.fetched_at is not None and (now - self.fetched_at) <= ttl
@@ -443,7 +452,9 @@ def due_candidate(
 
     Due = past its ``nextPollAt``, not in failure backoff and not held for
     another machine's reading (``UsageStore.adopt``). Sentinel
-    accounts (api-key / no credentials) have nothing to fetch. A
+    accounts (api-key / no credentials) have nothing to fetch, and neither
+    do statusline-sourced setup-token slots, which the collector never
+    fetches — picking one would spend the pick on a no-op every tick. A
     perpetually failing account can't monopolize the slot: its backoff
     removes it from the due set between attempts.
 
@@ -458,7 +469,7 @@ def due_candidate(
         if entry is None:
             due.append((0.0, num))
             continue
-        if entry.sentinel is not None:
+        if entry.sentinel is not None or entry.source == STATUSLINE_SOURCE:
             continue
         if entry.token_dead():
             continue  # dead refresh-token: quarantined, needs a re-login

@@ -348,7 +348,7 @@ cswap switch 2 --json
 
 Every payload carries a `schemaVersion` (currently `1`); on a handled error stdout is `{"schemaVersion":1,"error":{...}}` with a non-zero exit code. `--switch`/`--switch-to` report `{"switched": true|false, "from": …, "to": …, "reason": …}`.
 
-Usage is served from a per-account cache: when the usage API is briefly unreachable, the last-known numbers are shown instead of nothing (the human view marks them with their age, e.g. `· 2m ago`). Rows with decision-trusted usage carry additive `usageFetchedAt`/`usageAgeSeconds` fields telling you how old the measurement is. Whenever `usage` is null but a last-known measurement exists — data too old to drive a decision (`usageStatus` stays `unavailable`), or a row in a non-`ok` state such as `token_expired` — additive `lastGoodUsage`/`lastGoodFetchedAt`/`lastGoodAgeSeconds` fields preserve the human display without making the account actionable. When `usage` is null and nothing else explains it (`usageStatus` is `unavailable`), an additive `usageError` names the last fetch failure by kind (e.g. `http-429`, `timeout`) and, while the cache is backing off from it, `usageRetryAt` gives the time of the next attempt. These fields apply to list rows and the managed active row from `status --json`. An account held out of rotation with `cswap disable` carries an additive `"disabled": true` on its row (absent otherwise). Per-account policy follows the same convention: a row carries `"threshold": 85.0` once one is set with `cswap threshold` — absent otherwise, so a fleet that never sets a policy emits rows identical to before.
+Usage is served from a per-account cache: when the usage API is briefly unreachable, the last-known numbers are shown instead of nothing (the human view marks them with their age, e.g. `· 2m ago`). Rows with decision-trusted usage carry additive `usageFetchedAt`/`usageAgeSeconds` fields telling you how old the measurement is. Whenever `usage` is null but a last-known measurement exists — data too old to drive a decision (`usageStatus` stays `unavailable`), or a row in a non-`ok` state such as `token_expired` — additive `lastGoodUsage`/`lastGoodFetchedAt`/`lastGoodAgeSeconds` fields preserve the human display without making the account actionable. When `usage` is null and nothing else explains it (`usageStatus` is `unavailable`), an additive `usageError` names the last fetch failure by kind (e.g. `http-429`, `timeout`) and, while the cache is backing off from it, `usageRetryAt` gives the time of the next attempt. These fields apply to list rows and the managed active row from `status --json`. A setup-token account's row additively carries `"usageSource": "statusline"` (absent on every other row): its usage comes from the Claude Code statusline cache, stays `ok` at any age with `usageFetchedAt`/`usageAgeSeconds` taken from the reading's capture time, and reads `statusline_pending` until a first reading exists (see [Add an account from a raw token](#add-an-account-from-a-raw-token-or-api-key)). An account held out of rotation with `cswap disable` carries an additive `"disabled": true` on its row (absent otherwise). Per-account policy follows the same convention: a row carries `"threshold": 85.0` once one is set with `cswap threshold` — absent otherwise, so a fleet that never sets a policy emits rows identical to before.
 
 A row carries an additive `loginExpiresAt` (ISO-8601 UTC) when the stored login records when its refresh token expires, which is the moment the slot will need a fresh `/login` and `cswap add --slot N`; a script can warn a few days ahead instead of discovering `relogin_required`. Absent when Claude Code recorded no such date for that login.
 
@@ -378,6 +378,31 @@ cswap add-token --email user@example.com     # optional label override
 
 `--email` is optional; omitted values use `setup-token-{slot}@token.local`
 (or `api-key-{slot}@token.local` for API keys). No Anthropic API calls are made.
+
+**Usage for setup-token accounts.** A setup-token carries only the
+`user:inference` scope, which the usage endpoint refuses, so cswap never asks it
+(or refreshes the token, or counts its failures toward quarantine). Instead it
+reads the rate limits Claude Code itself hands to its statusline command, from a
+cache that your statusline command writes and cswap only reads:
+
+- directory: `$CLAUDE_USAGE_CACHE_DIR` if set, else `${XDG_STATE_HOME:-~/.local/state}/claude-usage` (on every OS)
+- file: `<sha256(accessToken) hex, first 16 chars>.json`
+- body: `{"schema": 1, "source": "statusline", "captured_at": <epoch s>, "five_hour": {"used_percentage": 12, "resets_at": <epoch s>} | null, "seven_day": {…} | null}`
+
+A reading is only as fresh as the last Claude Code reply on that token, so
+`list` and `status` always show its age (`· via statusline · 3h ago`). A window
+whose reset has passed counts as 0%; otherwise readings stay usable for switch
+decisions at any age, so `best`, `next-available` and `auto` (consume-first
+included) treat a setup-token account like any other. Until a first reading
+exists (or while the file is unreadable), `list` says none is recorded yet and
+`--json` reports `usageStatus: "statusline_pending"`: `auto` holds an active
+setup-token account rather than failing over, and skips an inactive one as
+unknown. The statusline reports no
+per-model windows, so `--model` cannot gate these accounts, and
+`cswap import-usage` skips them (each machine reads its own cache). The one
+request a setup-token can still trigger is the identity check at switch or
+`cswap add` time, which the profile endpoint refuses; cswap carries on as with
+any unanswered check.
 
 **API-key accounts.** Any bare `sk-ant-...` value that is not an OAuth token
 (`sk-ant-oat...`) registers a managed API-key account (the kind Claude Code uses

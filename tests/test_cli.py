@@ -56,8 +56,12 @@ def _subprocess_env(**extra: str) -> dict[str, str]:
     # CLAUDE_CONFIG_DIR / XDG_DATA_HOME bypass HOME in path resolution, so a
     # developer with either exported would otherwise point the spawned CLI back
     # at real config/backup paths (and on macOS, the real Keychain). Drop them
-    # unless a caller set them deliberately.
-    for var in ("CLAUDE_CONFIG_DIR", "XDG_DATA_HOME"):
+    # unless a caller set them deliberately; likewise the two that point the
+    # statusline usage cache at real readings.
+    for var in (
+        "CLAUDE_CONFIG_DIR", "XDG_DATA_HOME", "XDG_STATE_HOME",
+        "CLAUDE_USAGE_CACHE_DIR",
+    ):
         if var not in extra:
             env.pop(var, None)
     return env

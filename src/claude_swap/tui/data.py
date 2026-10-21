@@ -173,6 +173,23 @@ def format_age(age_s: float | None) -> str | None:
     return f"· {format_duration(age_s)} ago"
 
 
+def statusline_note(entry: usage_store.UsageEntry) -> str | None:
+    """Source note for a statusline reading ("· statusline 3h ago"), else None.
+
+    Always shown, however recent: such a reading is only as fresh as the last
+    Claude Code reply on that token, so its age is part of what it says.
+    """
+    if (
+        entry.source != usage_store.STATUSLINE_SOURCE
+        or entry.last_good is None
+        or entry.age_s is None
+    ):
+        return None
+    if entry.age_s < 60:
+        return "· statusline just now"
+    return f"· statusline {format_duration(entry.age_s)} ago"
+
+
 def clock_stamp() -> str:
     """HH:MM:SS local-time stamp for the event log."""
     return time.strftime("%H:%M:%S")
@@ -188,6 +205,7 @@ __all__ = [
     "reset_text",
     "run_action",
     "sentinel_label",
+    "statusline_note",
     "clock_stamp",
     "window_pct",
     "window_reset_text",

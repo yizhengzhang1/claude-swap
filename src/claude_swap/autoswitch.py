@@ -49,9 +49,13 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import ClassVar
 
-from claude_swap import oauth, poll_policy
+from claude_swap import oauth, poll_policy, statusline_usage
 from claude_swap.exceptions import ClaudeSwitchError
-from claude_swap.json_output import SCHEMA_VERSION, USAGE_TOKEN_EXPIRED
+from claude_swap.json_output import (
+    SCHEMA_VERSION,
+    USAGE_STATUSLINE_PENDING,
+    USAGE_TOKEN_EXPIRED,
+)
 from claude_swap.lines import BindingWindow, binding_window, window_line
 from claude_swap.locking import FileLock
 from claude_swap.poll_policy import (
@@ -61,7 +65,11 @@ from claude_swap.poll_policy import (
 )
 from claude_swap.settings import AutoSwitchSettings, atomic_write_json, parse_model_names
 from claude_swap.switcher import ClaudeAccountSwitcher
-from claude_swap.usage_store import due_candidate, plan_oversleeps_interval
+from claude_swap.usage_store import (
+    STATUSLINE_SOURCE,
+    due_candidate,
+    plan_oversleeps_interval,
+)
 
 STATE_FILENAME = "autoswitch_state.json"
 STATE_SCHEMA_VERSION = 1
@@ -1265,6 +1273,24 @@ class AutoSwitchEngine:
             else:
                 # Exhaustion is physical: at-limit reads the raw headroom.
                 trigger = "at-limit" if active_headroom <= 0 else "proactive"
+        elif usage.get(current) == USAGE_STATUSLINE_PENDING:
+            # A setup-token slot with no statusline reading yet: Claude Code
+            # records one with its next reply on this token, and nothing
+            # cswap fetches can produce it sooner. Failing over would strand
+            # the slot — it only gets readings while in use — so hold, for
+            # as long as it takes (no idle-hold cap).
+            self._unhealthy_ticks = 0
+            self._idle_hold_since = None
+            self._emit(
+                NoSwitchEvent(
+                    reason="active-usage-pending",
+                    detail=(
+                        "setup-token usage comes from the Claude Code "
+                        "statusline; none recorded yet"
+                    ),
+                )
+            )
+            return TickOutcome.NO_ACTION
         else:
             if usage.get(current) == USAGE_TOKEN_EXPIRED:
                 # Expired and the refresh could not complete this pass (lock
@@ -1597,8 +1623,14 @@ class AutoSwitchEngine:
                 # poller, which then serve their stored entries. Consume-first
                 # is opportunistic, not an escape — never act on stale data
                 # or slide to a worse-ranked target; hold and retry next tick.
+                # A statusline reading is never refetched, so its age proves
+                # nothing: decision-grade is as fresh as it gets.
                 entry = entries.get(num)
-                if entry is None or not entry.fresh(self.clock()):
+                if entry is not None and entry.source == STATUSLINE_SOURCE:
+                    fresh = isinstance(entry.decision_value(), dict)
+                else:
+                    fresh = entry is not None and entry.fresh(self.clock())
+                if not fresh:
                     self._emit(
                         NoSwitchEvent(
                             reason="stale-usage",
@@ -2449,8 +2481,15 @@ class AutoSwitchEngine:
                 active_value if isinstance(active_value, dict) else None, self._models
             )
         )
+        # An unknown active escalates, except where fresh candidate data
+        # changes nothing: an owned-and-expired token, or a setup-token still
+        # awaiting its first statusline reading (both hold instead).
         escalate = bool(candidates) and (
-            (active_headroom is None and active_value != USAGE_TOKEN_EXPIRED)
+            (
+                active_headroom is None
+                and active_value != USAGE_TOKEN_EXPIRED
+                and active_value != USAGE_STATUSLINE_PENDING
+            )
             or (active_headroom is not None and near_a_line)
         )
         if escalate:
@@ -2593,7 +2632,9 @@ class AutoSwitchEngine:
         active while gating nothing. That's only provable once every
         relevant oauth account has readable usage this tick — adaptive
         polling legitimately leaves gaps before that — and never worth a
-        forced refresh of its own.
+        forced refresh of its own. Setup-token slots are left out: their
+        statusline readings never carry per-model windows (and a pending one
+        never will), so they are no evidence either way.
         """
         wanted = {m.lower(): m for m in self._models if m.lower() != "all"}
         if not wanted:
@@ -2605,7 +2646,11 @@ class AutoSwitchEngine:
             if n not in quarantined
             and self.switcher.account_kind_for(n) != "api_key"
         ]
-        values = [usage.get(n) for n in relevant]
+        values = [
+            usage.get(n)
+            for n in relevant
+            if not statusline_usage.is_statusline_value(usage.get(n))
+        ]
         readable = [v for v in values if isinstance(v, dict)]
         if not readable or len(readable) != len(values):
             return  # not every account observed yet — re-check next tick

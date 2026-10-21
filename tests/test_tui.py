@@ -625,6 +625,92 @@ class TestUsageRows:
         assert " · " not in narrow
 
 
+def make_statusline_entry(age_s: float, pct5: float = 25.0) -> UsageEntry:
+    """A setup-token slot's entry as the collector builds it from the
+    statusline cache: decision-trusted at any age."""
+    from claude_swap.statusline_usage import StatuslineUsage
+    from claude_swap.usage_store import STATUSLINE_SOURCE
+
+    return UsageEntry(
+        last_good=StatuslineUsage({
+            "five_hour": {"pct": pct5, "resets_at": _iso_in(7200)},
+            "seven_day": {"pct": 10.0, "resets_at": _iso_in(86400 * 3)},
+        }),
+        fetched_at=time.time() - age_s,
+        age_s=age_s,
+        trust_extended=True,
+        source=STATUSLINE_SOURCE,
+    )
+
+
+def _dimmed(text) -> bool:
+    return any("dim" in str(span.style) for span in text.spans)
+
+
+class TestStatuslineRendering:
+    def test_card_header_always_names_the_source(self):
+        from claude_swap.tui.widgets import account_card_text
+
+        old = account_card_text(
+            make_account(2, active=True, entry=make_statusline_entry(3 * 3600 + 60)),
+            100,
+        ).plain
+        assert "· statusline 3h 1m ago" in old.splitlines()[0]
+        recent = account_card_text(
+            make_account(2, active=True, entry=make_statusline_entry(5)), 100
+        ).plain
+        assert "· statusline just now" in recent.splitlines()[0]
+
+    def test_old_reading_is_not_dimmed(self):
+        from claude_swap.tui.widgets import account_card_text, mini_account_text
+
+        entry = make_statusline_entry(6 * 3600)
+        card = account_card_text(make_account(2, active=True, entry=entry), 100)
+        mini = mini_account_text(make_account(2, entry=entry), time.time())
+        assert not _dimmed(card)
+        assert not _dimmed(mini)
+        # CONTROL: an API reading that old is dimmed, as before.
+        stale = make_entry(age_s=6 * 3600)
+        assert _dimmed(account_card_text(make_account(1, active=True, entry=stale), 100))
+        assert _dimmed(mini_account_text(make_account(1, entry=stale), time.time()))
+
+    def test_mini_row_shows_the_source_note(self):
+        from claude_swap.tui.widgets import mini_account_text
+
+        text = mini_account_text(
+            make_account(2, entry=make_statusline_entry(2 * 3600)), time.time()
+        ).plain
+        assert text.rstrip().endswith("5h 25% · 7d 10%  · statusline 2h ago")
+
+    def test_pending_is_muted_not_a_warning(self):
+        from claude_swap.json_output import USAGE_STATUSLINE_PENDING
+        from claude_swap.tui.theme import Palette
+        from claude_swap.tui.widgets import account_card_text, mini_account_text
+
+        entry = UsageEntry(sentinel=USAGE_STATUSLINE_PENDING, source="statusline")
+        card = account_card_text(make_account(2, active=True, entry=entry), 100)
+        label = tui_data.sentinel_label(USAGE_STATUSLINE_PENDING)
+        assert f"· {label}" in card.plain
+        assert "⚠" not in card.plain
+        assert "statusline" in label
+        mini = mini_account_text(make_account(2, entry=entry), time.time())
+        assert label in mini.plain
+        palette = Palette.DARK
+        for text in (card, mini):
+            styles = {str(span.style) for span in text.spans}
+            assert palette.sev_warn not in styles
+
+    def test_api_rows_carry_no_source_note(self):
+        from claude_swap.tui.widgets import account_card_text, mini_account_text
+
+        entry = make_entry(age_s=600)
+        card = account_card_text(make_account(1, active=True, entry=entry), 100).plain
+        mini = mini_account_text(make_account(1, entry=entry), time.time()).plain
+        assert "statusline" not in card and "statusline" not in mini
+        assert "· 10m ago" in card.splitlines()[0]
+        assert tui_data.statusline_note(entry) is None
+
+
 class TestMiniAccountText:
     def test_seven_day_ahead_of_pace_marker(self):
         from claude_swap.tui.widgets import mini_account_text

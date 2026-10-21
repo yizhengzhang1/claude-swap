@@ -25,7 +25,7 @@ from claude_swap.exceptions import (
     SwitchError,
     ValidationError,
 )
-from claude_swap import oauth, pace
+from claude_swap import oauth, pace, statusline_usage
 from claude_swap.claude_locks import claude_config_lock, claude_credentials_lock
 from claude_swap.json_output import (
     SCHEMA_VERSION,
@@ -34,6 +34,7 @@ from claude_swap.json_output import (
     USAGE_KEYCHAIN_UNAVAILABLE,
     USAGE_NO_CREDENTIALS,
     USAGE_RELOGIN_REQUIRED,
+    USAGE_STATUSLINE_PENDING,
     USAGE_TOKEN_EXPIRED,
     account_ref,
     account_row,
@@ -93,6 +94,7 @@ from claude_swap.process_detection import get_running_instances
 from claude_swap import poll_policy
 from claude_swap.settings import load_settings, parse_model_names, settings_path
 from claude_swap.usage_store import (
+    STATUSLINE_SOURCE,
     FetchRecord,
     UsageEntry,
     UsageStore,
@@ -107,9 +109,9 @@ KEYRING_SERVICE = "claude-code"
 # SECURITY_SERVICE and CLAUDE_CODE_KEYCHAIN_SERVICE now live in credentials.py
 # (storage concerns); re-exported above for migrations.py and the test suite.
 
-# Setup-tokens are inference-only server-side; wider scopes trigger 403s
-# on profile endpoints. Matches Claude Code's CLAUDE_CODE_OAUTH_TOKEN path.
-SETUP_TOKEN_SCOPES = ("user:inference",)
+# Re-exported: the definition lives in oauth.py next to the setup-token
+# classifier, which the usage collector and the auto engine share.
+SETUP_TOKEN_SCOPES = oauth.SETUP_TOKEN_SCOPES
 
 # Delay between successive usage-request launches in one collect pass, so N
 # accounts never burst the shared usage endpoint from one IP in the same
@@ -208,6 +210,10 @@ SENTINEL_NOTES = {
     USAGE_API_KEY: "API key (no quota)",
     USAGE_KEYCHAIN_UNAVAILABLE: "keychain unavailable — locked or in use; try again",
     USAGE_RELOGIN_REQUIRED: "re-login needed — refresh token dead; log in with Claude Code, then run: cswap add",
+    USAGE_STATUSLINE_PENDING: (
+        "usage comes from the Claude Code statusline — none recorded yet "
+        "for this token"
+    ),
 }
 
 
@@ -233,9 +239,11 @@ def _usage_entry_lines(entry: UsageEntry) -> list[str]:
 
     Sentinel states render their note first, with a supplementary "last seen"
     line when an older measurement exists. Measurements render as usual, age-
-    annotated once older than ``_USAGE_AGE_NOTE_S`` (stale-served); an account
-    with no measurement at all shows "usage unavailable" plus the last fetch
-    error, so a failing endpoint is visible instead of a silent blank.
+    annotated once older than ``_USAGE_AGE_NOTE_S`` (stale-served); a
+    statusline reading always names its source and age, since it is only as
+    fresh as the last Claude Code reply on that token. An account with no
+    measurement at all shows "usage unavailable" plus the last fetch error,
+    so a failing endpoint is visible instead of a silent blank.
     """
     if entry.sentinel is not None:
         out = [dimmed(SENTINEL_NOTES.get(entry.sentinel, entry.sentinel))]
@@ -245,13 +253,12 @@ def _usage_entry_lines(entry: UsageEntry) -> list[str]:
         return out
     if entry.last_good is not None:
         lines = _format_usage_lines(entry.last_good, entry.fetched_at)
-        if (
-            lines
-            and entry.age_s is not None
-            and entry.age_s > _USAGE_AGE_NOTE_S
-            and entry.fetched_at is not None
-        ):
-            lines[-1] += f" · {format_age(int(entry.fetched_at * 1000))}"
+        if lines and entry.fetched_at is not None:
+            age = format_age(int(entry.fetched_at * 1000))
+            if entry.source == STATUSLINE_SOURCE:
+                lines[-1] += f" · via statusline · {age}"
+            elif entry.age_s is not None and entry.age_s > _USAGE_AGE_NOTE_S:
+                lines[-1] += f" · {age}"
         return [
             f"{dimmed('└' if j == len(lines) - 1 else '├')} {muted(line)}"
             for j, line in enumerate(lines)
@@ -1746,8 +1753,8 @@ class ClaudeAccountSwitcher:
         """Public wrapper: account number → decision-grade usage value.
 
         Each value is a usage dict (last-good, trusted while ≤
-        ``usage_store.STALE_OK_S`` old), a sentinel string, or ``None``
-        (unknown).
+        ``usage_store.STALE_OK_S`` old; a setup-token slot's statusline
+        reading at any age), a sentinel string, or ``None`` (unknown).
         """
         return self._usage_by_account()
 
@@ -5202,6 +5209,11 @@ class ClaudeAccountSwitcher:
         the same plan. A failed fetch only updates the entry's error/backoff
         fields, so the last-good measurement keeps being served
         (stale-on-error).
+
+        Setup-token slots never take part in any of that: the usage endpoint
+        refuses their inference-only token, so their entry is read from the
+        Claude Code statusline cache (``statusline_usage``) on every pass,
+        whatever ``fetch`` says — no claim, request, refresh or strike.
         """
         store = self._usage_store
         identities = {
@@ -5217,13 +5229,24 @@ class ClaudeAccountSwitcher:
             static = self._static_usage_sentinel(info)
             if static is not None:
                 sentinels[num] = static
+        # Classified on info[5]: the live credential for the active slot, the
+        # backup otherwise. A setup-token never rotates, so either copy (and a
+        # session profile's) names the same cache file.
+        statusline = {
+            num
+            for num, info in info_by_num.items()
+            if num not in sentinels and oauth.is_setup_token_credential(info[5])
+        }
 
         entries = store.entries(identities, models)
         # Dead refresh-token lineage: quarantine. Surfacing the sentinel here both
         # drives the "re-login needed" display and (via ``num not in sentinels``
         # below) stops the endless fetch loop that would otherwise 401/429 forever.
+        # A setup-token slot is skipped: a strike left from when it was still
+        # fetched binds to bytes that never change, and would read "re-login
+        # needed" forever over its statusline reading.
         for num in info_by_num:
-            if num in sentinels:
+            if num in sentinels or num in statusline:
                 continue
             entry = entries[num]
             _i = info_by_num[num]
@@ -5239,10 +5262,14 @@ class ClaudeAccountSwitcher:
                     [num], {num: identities[num]}
                 )
                 entries = store.entries(identities, models)
+        # Setup-token slots stay out of reserve() itself, so they never reach
+        # the fetch path, record() or the post-fetch strike scan below.
         requested = [
             num
             for num in info_by_num
-            if num not in sentinels and (fetch is None or num in fetch)
+            if num not in sentinels
+            and num not in statusline
+            and (fetch is None or num in fetch)
         ]
         if fetch is None:
             # Repair reset-parked plans written by releases that stopped
@@ -5273,6 +5300,8 @@ class ClaudeAccountSwitcher:
         for num, info in info_by_num.items():
             if num in sentinels or not info[4]:  # info[4] = is_active
                 continue
+            if num in statusline:
+                continue  # no expiry to surface: its reading comes from the cache
             if num in claims:
                 continue  # the fetch path will handle (or sentinel) it now
             if entries[num].held(now):
@@ -5313,10 +5342,19 @@ class ClaudeAccountSwitcher:
                 ):
                     sentinels[num] = USAGE_RELOGIN_REQUIRED
 
-        return {
+        collected = {
             num: with_sentinel(entries[num], sentinels.get(num))
             for num in info_by_num
         }
+        if statusline:
+            # Read in this thread with the store's clock, after any fetches,
+            # and substituted last so nothing above can overwrite it.
+            now = store.clock()
+            for num in statusline:
+                collected[num] = statusline_usage.usage_entry(
+                    info_by_num[num][5], now
+                )
+        return collected
 
     def _slot_token_dead(self, num: str, email: str) -> bool:
         """Is this slot quarantined as refresh-token-dead, right now?
@@ -5373,6 +5411,12 @@ class ClaudeAccountSwitcher:
             stored = active_value
         else:
             stored = backup
+        if oauth.is_setup_token_credential(stored):
+            # The collectors never strike a setup-token slot (it is read from
+            # the statusline cache, not fetched), so a strike row left from
+            # before is no quarantine to heal: replacing the slot without
+            # --force would discard a working token.
+            return False
         return self._entry_token_dead(entry, num, email, stored, is_active)
 
     def _entry_token_dead(
@@ -5500,15 +5544,20 @@ class ClaudeAccountSwitcher:
 
         A configured name that no account reports gates nothing while looking
         active. Only claimed when every account's usage is readable (an
-        unreadable account could be the one carrying the window)."""
+        unreadable account could be the one carrying the window). Setup-token
+        slots are no evidence either way: their statusline readings never
+        carry per-model windows, so a fleet of them alone proves nothing."""
         wanted = {m.lower(): m for m in models if m.lower() != "all"}
-        if not wanted or not usage:
+        evidence = [
+            v for v in usage.values() if not statusline_usage.is_statusline_value(v)
+        ]
+        if not wanted or not evidence:
             return
-        if any(not isinstance(v, dict) for v in usage.values()):
+        if any(not isinstance(v, dict) for v in evidence):
             return
         seen = {
             s["name"].lower()
-            for v in usage.values()
+            for v in evidence
             for s in (v.get("scoped") or [])
             if isinstance(s, dict) and isinstance(s.get("name"), str)
         }
@@ -5668,16 +5717,20 @@ class ClaudeAccountSwitcher:
         windows carry a non-null ``resets_at`` are compared (two idle
         accounts at 0% with nothing scheduled are indistinguishable, never
         flagged; API-key slots have sentinel usage and never reach the
-        comparison). Known benign false-positive source until PR #119 lands:
-        a session profile that drifted to another account makes its slot
-        report that account's usage — same lockstep signature, different
-        cause.
+        comparison, and statusline rows are skipped: two setup-tokens minted
+        from one claude.ai account legitimately report the same windows, and
+        the remedy named here does not apply to them). Known benign
+        false-positive source until PR #119 lands: a session profile that
+        drifted to another account makes its slot report that account's
+        usage — same lockstep signature, different cause.
         """
         seen: dict[tuple, str] = {}
         out: list[str] = []
         for num, _email, _org_name, _org_uuid, _is_active, _creds, _alias in accounts_info:
             snum = str(num)
             entry = entries.get(snum)
+            if entry is not None and entry.source == STATUSLINE_SOURCE:
+                continue
             usage = entry.decision_value() if entry else None
             if not isinstance(usage, dict):
                 continue
@@ -5717,10 +5770,13 @@ class ClaudeAccountSwitcher:
             if is_active:
                 active_num = num
             entry = entries[str(num)]
-            # JSON carries the decision-grade value: last-good only while it is
-            # recent enough to act on (≤ STALE_OK_S), else unavailable. Showing
-            # older measurements is a human-display affordance only — scripts
-            # keying on usageStatus == "ok" must not act on arbitrarily old data.
+            # JSON carries the decision-grade value: an API measurement only
+            # while it is recent enough to act on (≤ STALE_OK_S, or extended
+            # trust), else unavailable — showing older ones is a human-display
+            # affordance only, and scripts keying on usageStatus == "ok" must
+            # not act on arbitrarily old data. A statusline reading
+            # (usageSource) is the exception: "ok" at any age, because its
+            # windows roll to 0% at their reset; usageAgeSeconds says how old.
             accounts.append(
                 account_row(
                     num, email, org_name, org_uuid, is_active,
@@ -5736,6 +5792,7 @@ class ClaudeAccountSwitcher:
                     disabled=self._disabled_from_data(seq_data, str(num)),
                     policy=self._policy_from_data(seq_data, str(num)),
                     login_expires_at=oauth.login_expires_at_iso(creds),
+                    usage_source=entry.source,
                 )
             )
         payload = {
@@ -5898,8 +5955,9 @@ class ClaudeAccountSwitcher:
         org_uuid = acct.get("organizationUuid", "") or ""
         alias = acct.get("alias", "") or ""
         entry = self._active_account_usage(account_num, current_email, org_uuid)
-        # Decision-grade projection, same rule as the --list payload: stale
-        # beyond STALE_OK_S reports unavailable, not "ok" with old numbers.
+        # Decision-grade projection, same rule as the --list payload: an API
+        # measurement stale beyond STALE_OK_S reports unavailable, not "ok"
+        # with old numbers; a statusline reading is "ok" at any age.
         status, usage = usage_fields(entry.decision_value(), entry.fetched_at)
         active: dict = {
             "number": int(account_num),
@@ -5926,6 +5984,8 @@ class ClaudeAccountSwitcher:
                 status, entry.last_error,
                 entry.backoff_until if entry.in_backoff(now) else None,
             ))
+        if entry.source:
+            active["usageSource"] = entry.source
         return {
             "schemaVersion": SCHEMA_VERSION,
             "active": active,
@@ -6656,6 +6716,10 @@ class ClaudeAccountSwitcher:
         access_token = oauth.extract_access_token(live)
         if not access_token:
             return result  # raw API key / garbled JSON — nothing to resolve
+        # A setup-token can land here too (live bytes re-serialized next to
+        # its backup). The profile endpoint refuses its inference-only scope,
+        # which resolves to None: the fail-open "unresolved" path, as for any
+        # unanswered probe. The usage endpoint is never asked for one.
         try:
             result["resolved"] = oauth.fetch_oauth_profile(access_token)
         except Exception as e:

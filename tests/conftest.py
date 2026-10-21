@@ -15,6 +15,7 @@ import pytest
 
 from claude_swap import macos_keychain as _macos_keychain
 from claude_swap import paths as _paths
+from claude_swap import statusline_usage as _statusline_usage
 
 
 class RealStoreWriteBlocked(Exception):
@@ -76,11 +77,13 @@ def _freeze_real_store_specs() -> tuple[tuple[Path, bool], ...]:
 
     * The GENUINELY-DEFAULT roots: mirrors ``_isolate_real_home``'s notion of
       "real" — ``CLAUDE_CONFIG_DIR``/``CLAUDE_SECURESTORAGE_CONFIG_DIR``/
-      ``XDG_DATA_HOME`` are cleared for this resolution (then restored), so a
-      developer who happens to have one of those exported in their normal
-      shell still gets the default roots (``~/.claude``, ``~/.local/share/
-      claude-swap``) protected — the same three vars that fixture neutralizes
-      for every test, regardless of ``temp_home``.
+      ``XDG_DATA_HOME`` (and the statusline cache's ``XDG_STATE_HOME``/
+      ``CLAUDE_USAGE_CACHE_DIR``) are cleared for this resolution (then
+      restored), so a developer who happens to have one of those exported in
+      their normal shell still gets the default roots (``~/.claude``,
+      ``~/.local/share/claude-swap``, ``~/.local/state/claude-usage``)
+      protected — the same vars that fixture neutralizes for every test,
+      regardless of ``temp_home``.
     * The AMBIENT-OVERRIDE roots: resolved WITHOUT clearing those vars, i.e.
       exactly what ``claude_swap.paths`` resolves to under the environment as
       it actually is at conftest import time. A developer with
@@ -144,6 +147,11 @@ def _freeze_real_store_specs() -> tuple[tuple[Path, bool], ...]:
             # directory exists, so not one mkdir is attempted above them.
             (_paths.get_default_claude_config_home() / "projects", True),
             (_paths.get_claude_config_home() / "projects", True),
+            # The Claude Code statusline's usage cache. cswap only reads it,
+            # but statusline tests write cache files, and one that lost its
+            # CLAUDE_USAGE_CACHE_DIR would write over the developer's real
+            # readings.
+            (_statusline_usage.cache_dir(), True),
         )
 
     ambient_specs = _resolve()
@@ -162,7 +170,8 @@ def _freeze_real_store_specs() -> tuple[tuple[Path, bool], ...]:
                     os.environ[k] = v
 
     default_specs = _resolve_with_cleared(
-        "CLAUDE_CONFIG_DIR", "CLAUDE_SECURESTORAGE_CONFIG_DIR", "XDG_DATA_HOME"
+        "CLAUDE_CONFIG_DIR", "CLAUDE_SECURESTORAGE_CONFIG_DIR", "XDG_DATA_HOME",
+        "XDG_STATE_HOME", "CLAUDE_USAGE_CACHE_DIR",
     )
     # C-0: a THIRD snapshot, additive to (not replacing) default_specs above.
     # The mandated review/CI isolation recipe sets HOME/USERPROFILE (and
@@ -182,7 +191,7 @@ def _freeze_real_store_specs() -> tuple[tuple[Path, bool], ...]:
     # used to protect.
     home_default_specs = _resolve_with_cleared(
         "CLAUDE_CONFIG_DIR", "CLAUDE_SECURESTORAGE_CONFIG_DIR", "XDG_DATA_HOME",
-        "HOME", "USERPROFILE",
+        "XDG_STATE_HOME", "CLAUDE_USAGE_CACHE_DIR", "HOME", "USERPROFILE",
     )
 
     seen: set[Path] = set()
@@ -510,11 +519,16 @@ def _isolate_real_home(request, tmp_path_factory, monkeypatch):
     (``paths.get_global_config_path``/``get_backup_root``), so a developer with
     either exported could otherwise have tests read/write real Claude config or
     backup paths — and on macOS that leads back to the real Keychain. Tests that
-    exercise those vars set them explicitly, overriding this.
+    exercise those vars set them explicitly, overriding this. The same goes for
+    ``XDG_STATE_HOME``/``CLAUDE_USAGE_CACHE_DIR``, which point the statusline
+    usage cache (``statusline_usage.cache_dir``) at a statusline user's real
+    readings.
     """
     monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
     monkeypatch.delenv("CLAUDE_SECURESTORAGE_CONFIG_DIR", raising=False)
     monkeypatch.delenv("XDG_DATA_HOME", raising=False)
+    monkeypatch.delenv("XDG_STATE_HOME", raising=False)
+    monkeypatch.delenv("CLAUDE_USAGE_CACHE_DIR", raising=False)
     if "temp_home" in request.fixturenames:
         return  # temp_home provides its own isolated home
     if "tmp_keychain" in request.fixturenames:

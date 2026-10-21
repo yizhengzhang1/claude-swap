@@ -41,6 +41,37 @@ def extract_oauth_data(credentials: str) -> dict | None:
     return oauth if isinstance(oauth, dict) else None
 
 
+# Setup-tokens are inference-only server-side; wider scopes trigger 403s
+# on profile endpoints. Matches Claude Code's CLAUDE_CODE_OAUTH_TOKEN path.
+SETUP_TOKEN_SCOPES = ("user:inference",)
+
+
+def is_setup_token_credential(credentials: str) -> bool:
+    """Whether a stored credential is a long-lived setup-token.
+
+    The shape ``add-token`` writes: an access token with exactly the
+    inference scope and no refresh token or expiry (``None`` counts as
+    absent — the live store carries them as explicit nulls). Strict on
+    purpose: an access-token-only blob without that scope list is an OAuth
+    login in some degraded state (Claude Code's ``invalid_grant`` wipe, a
+    partial write), and those must keep their OAuth recovery paths.
+    """
+    try:
+        data = extract_oauth_data(credentials)
+    except (TypeError, AttributeError):
+        return False
+    if data is None:
+        return False
+    token = data.get("accessToken")
+    return (
+        isinstance(token, str)
+        and bool(token)
+        and not data.get("refreshToken")
+        and not data.get("expiresAt")
+        and data.get("scopes") == list(SETUP_TOKEN_SCOPES)
+    )
+
+
 def credential_fingerprint(credentials: str) -> str | None:
     """Stable identity fingerprint for a stored credential.
 

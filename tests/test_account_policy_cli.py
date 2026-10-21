@@ -47,8 +47,7 @@ class PolicyCliBase(PolicyStoreBase):
     def _main(argv: list[str]) -> None:
         """Drive a full `cswap ...` argv through `main()`'s dispatch."""
         with patch.object(sys, "argv", ["claude-swap", *argv]), \
-             patch("os.geteuid", return_value=1000, create=True), \
-             patch("claude_swap.update_check.check_for_update", return_value=None):
+             patch("os.geteuid", return_value=1000, create=True):
             cli.main()
 
     @staticmethod

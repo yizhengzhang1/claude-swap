@@ -727,8 +727,8 @@ def test_mkdir_exist_ok_true_does_not_swallow_the_refusal(
     catches it via its own ``except OSError:`` (when the directory already
     exists) and returns normally instead of propagating -- the guard fired,
     but the caller ate the refusal and proceeded as if nothing happened.
-    That is the exact shape ``cache.write_cache`` / ``_atomic_b64_write`` /
-    ``_update_global_config`` all use.
+    That is the exact shape ``_atomic_b64_write`` / ``_update_global_config``
+    both use.
 
     A absent-dir: refuses and raises (mkdir's own bootstrap case).
     B existing-dir: must ALSO raise -- today it is swallowed instead.

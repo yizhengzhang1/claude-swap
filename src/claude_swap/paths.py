@@ -124,7 +124,7 @@ def get_backup_root() -> Path:
 
 
 # Names that any prior cswap run may have created in the backup root without
-# user data being present (logger output, update-check + usage cache). The
+# user data being present (logger output, usage cache). The
 # migration treats a target containing only these as effectively empty, since
 # wiping them loses no real state.
 _THROWAWAY_NAMES = {"cache"}

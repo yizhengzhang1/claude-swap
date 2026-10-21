@@ -27,11 +27,10 @@ uv run cswap help
 
 ### Updating
 
+This fork has no self-upgrade command. Reinstall it from git to update:
+
 ```bash
-cswap upgrade          # uv/pipx installs on macOS/Linux: auto-detects and upgrades
-# or run your installer directly:
-uv tool upgrade claude-swap
-pipx upgrade claude-swap
+uv tool install --force git+https://github.com/yizhengzhang1/claude-swap@<branch>
 ```
 
 ## Usage
@@ -206,7 +205,6 @@ cswap unclaimed                 # List stashed credential entries (slot + why th
 cswap unclaimed --purge ID      # Drop one (deletes its bytes; recover with /login + `cswap add`)
 cswap tui                       # Interactive dashboard (also: bare `cswap`)
 cswap watch                     # Dashboard, opened on the live watch page
-cswap upgrade                   # Upgrade claude-swap to the latest version
 cswap purge                     # Remove all claude-swap data
 ```
 
@@ -264,7 +262,7 @@ cswap menubar --service-status      # installed? loaded? pid?
 cswap menubar --uninstall-service   # stop it and remove the plist
 ```
 
-The agent lives at `~/Library/LaunchAgents/com.cswap.menubar.plist` and logs to `~/Library/Logs/com.cswap.menubar.{log,err}`. It pins the `cswap` console script, whose path survives an upgrade — but the running process keeps the old build until it restarts, so after `cswap upgrade` either re-run `--install-service` or `launchctl kickstart -k gui/$(id -u)/com.cswap.menubar`.
+The agent lives at `~/Library/LaunchAgents/com.cswap.menubar.plist` and logs to `~/Library/Logs/com.cswap.menubar.{log,err}`. It pins the `cswap` console script, whose path survives an upgrade — but the running process keeps the old build until it restarts, so after reinstalling either re-run `--install-service` or `launchctl kickstart -k gui/$(id -u)/com.cswap.menubar`.
 
 </details>
 
@@ -283,7 +281,6 @@ cswap config get autoswitch.threshold
 cswap config set autoswitch.threshold 80  # validated: rejects out-of-range values loudly
 cswap config set autoswitch.weeklyThreshold 97  # own switch line for the 7-day/per-model windows
 cswap config set autoswitch.model Fable   # per-model switching (see "auto"); Fable,Opus for several
-cswap config set updates.check false      # no daily PyPI lookup for the "newer version" hint
 cswap config unset autoswitch.threshold   # back to the default
 cswap config path                         # where settings.json lives
 ```

@@ -17,11 +17,9 @@ from claude_swap.settings import (
     atomic_write_json,
     AutoSwitchSettings,
     UiSettings,
-    UpdateSettings,
     effective_settings,
     load_settings,
     load_ui_settings,
-    load_update_settings,
     merged_with_cli,
     save_settings,
     set_setting,
@@ -156,25 +154,27 @@ class TestUiSettings:
             set_setting(tmp_path, "ui.theme", "purple")
 
 
-class TestUpdateSettings:
-    def test_missing_file_checks(self, tmp_path: Path):
-        assert load_update_settings(tmp_path) == UpdateSettings(check=True)
+class TestLegacyUpdatesSection:
+    """`updates.check` was removed with `cswap upgrade`; old files keep working."""
 
-    def test_reads_false(self, tmp_path: Path):
-        settings_path(tmp_path).write_text(json.dumps({"updates": {"check": False}}))
-        assert load_update_settings(tmp_path).check is False
-
-    def test_non_boolean_falls_back_to_default(self, tmp_path: Path):
-        settings_path(tmp_path).write_text(json.dumps({"updates": {"check": "false"}}))
-        assert load_update_settings(tmp_path).check is True
-
-    def test_set_and_unset_updates_check(self, tmp_path: Path):
-        assert set_setting(tmp_path, "updates.check", "false") is False
+    def test_old_updates_section_loads_and_survives_a_write(self, tmp_path: Path):
+        settings_path(tmp_path).write_text(json.dumps({
+            "schemaVersion": 1,
+            "updates": {"check": False},
+            "ui": {"theme": "light"},
+        }))
+        assert load_settings(tmp_path) == AutoSwitchSettings()
+        assert load_ui_settings(tmp_path).theme == "light"
+        assert all(spec.section != "updates" for spec, _, _ in effective_settings(tmp_path))
+        set_setting(tmp_path, "autoswitch.threshold", "80")
         raw = json.loads(settings_path(tmp_path).read_text())
-        assert raw == {"schemaVersion": 1, "updates": {"check": False}}
-        assert load_update_settings(tmp_path).check is False
-        assert unset_setting(tmp_path, "updates.check") is True
-        assert "updates" not in json.loads(settings_path(tmp_path).read_text())
+        assert raw["updates"] == {"check": False}
+        assert raw["autoswitch"] == {"threshold": 80.0}
+
+    def test_the_key_is_no_longer_a_setting(self, tmp_path: Path):
+        assert "updates.check" not in SETTING_SPECS
+        with pytest.raises(ConfigError, match="unknown setting"):
+            set_setting(tmp_path, "updates.check", "false")
 
 
 class TestSettingSpecs:
@@ -188,15 +188,11 @@ class TestSettingSpecs:
         assert by_section["ui"] == {
             f.name for f in UiSettings.__dataclass_fields__.values()
         }
-        assert by_section["updates"] == {
-            f.name for f in UpdateSettings.__dataclass_fields__.values()
-        }
 
     def test_defaults_match_dataclass(self):
         sources = {
             "autoswitch": AutoSwitchSettings(),
             "ui": UiSettings(),
-            "updates": UpdateSettings(),
         }
         for spec in SETTING_SPECS.values():
             assert spec.default == getattr(sources[spec.section], spec.field)

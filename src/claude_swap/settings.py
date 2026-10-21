@@ -2,7 +2,7 @@
 
 One versioned JSON file for user-tunable claude-swap preferences, written
 atomically with the backup dir's 0600/0700 modes. v1 carries the
-``autoswitch``, ``ui`` and ``updates`` sections; other sections can be added additively.
+``autoswitch`` and ``ui`` sections; other sections can be added additively.
 Unknown keys (future fields, other tools' experiments) survive a round trip.
 
 Reading is forgiving — a missing or corrupt file yields defaults with a logged
@@ -77,19 +77,9 @@ class UiSettings:
     theme: str = "auto"
 
 
-@dataclass(frozen=True)
-class UpdateSettings:
-    """Update notification (``updates`` section). ``check`` turns the daily
-    PyPI lookup behind the "newer version available" hint on or off;
-    ``cswap upgrade`` works either way."""
-
-    check: bool = True
-
-
 _SECTION_DEFAULT_SOURCES = {
     "autoswitch": AutoSwitchSettings,
     "ui": UiSettings,
-    "updates": UpdateSettings,
 }
 
 
@@ -102,7 +92,7 @@ class SettingSpec:
     (`parse_setting_value`) read from here, so the two can't drift.
     """
 
-    section: str  # top-level JSON section ("autoswitch", "ui", "updates")
+    section: str  # top-level JSON section ("autoswitch", "ui")
     json_key: str  # camelCase key inside the section
     field: str  # snake_case AutoSwitchSettings field
     kind: str  # "float" | "int" | "bool" | "choice"
@@ -165,10 +155,6 @@ SETTING_SPECS: dict[str, SettingSpec] = {
         SettingSpec(
             "ui", "theme", "theme", "choice", choices=("dark", "light", "auto"),
             help="Color theme; auto follows the terminal background",
-        ),
-        SettingSpec(
-            "updates", "check", "check", "bool",
-            help="Check PyPI once a day and print a hint when a newer release exists",
         ),
     )
 }
@@ -286,23 +272,6 @@ def load_ui_settings(backup_root: Path) -> UiSettings:
         )
         return default
     return UiSettings(theme=theme)
-
-
-def load_update_settings(backup_root: Path) -> UpdateSettings:
-    """Load the updates section; missing/corrupt file or non-boolean → default."""
-    raw = _read_raw(settings_path(backup_root))
-    section = raw.get("updates")
-    default = UpdateSettings()
-    if not isinstance(section, dict):
-        return default
-    check = section.get("check", default.check)
-    if not isinstance(check, bool):
-        _logger.warning(
-            "settings.json: updates.check %r is not true or false; using %r",
-            check, default.check,
-        )
-        return default
-    return UpdateSettings(check=check)
 
 
 def save_settings(backup_root: Path, settings: AutoSwitchSettings) -> None:
@@ -476,7 +445,6 @@ def effective_settings(backup_root: Path) -> list[tuple[SettingSpec, object, boo
     loaded = {
         "autoswitch": load_settings(backup_root),
         "ui": load_ui_settings(backup_root),
-        "updates": load_update_settings(backup_root),
     }
     rows = []
     for spec in SETTING_SPECS.values():

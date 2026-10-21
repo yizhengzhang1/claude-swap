@@ -110,7 +110,6 @@ class TestTheVerbIsGone(PolicyStoreBase):
         self._fleet(temp_home)
         with patch.object(sys, "argv", ["claude-swap", "standby", "1"]), \
              patch("os.geteuid", return_value=1000, create=True), \
-             patch("claude_swap.update_check.check_for_update", return_value=None), \
              pytest.raises(SystemExit) as exc:
             cli.main()
         assert exc.value.code not in (0, None)

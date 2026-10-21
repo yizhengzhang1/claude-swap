@@ -11,12 +11,13 @@ Two decisions here are worth stating, because both differ from the obvious
 approach:
 
 *The plist pins the console script, not ``sys.executable``.* A LaunchAgent
-outlives upgrades, and the two paths age differently: ``uv tool upgrade`` (and
-``cswap upgrade``) rebuilds the tool's virtualenv — ``sys.executable`` points
-inside that virtualenv and can be replaced — while the console script keeps its
-path across upgrades. Pinning the script means an upgraded cswap needs a
-``launchctl kickstart``, not a reinstalled service. ``sys.executable -m
-claude_swap`` stays as the fallback for installs that expose no console script.
+outlives upgrades, and the two paths age differently: ``uv tool upgrade`` (or a
+``uv tool install --force`` reinstall) rebuilds the tool's virtualenv —
+``sys.executable`` points inside that virtualenv and can be replaced — while the
+console script keeps its path across upgrades. Pinning the script means an
+upgraded cswap needs a ``launchctl kickstart``, not a reinstalled service.
+``sys.executable -m claude_swap`` stays as the fallback for installs that
+expose no console script.
 
 *Logs go to ``~/Library/Logs``, not ``/tmp``.* ``/tmp`` is world-writable and
 periodically purged, so a crash log can vanish before anyone reads it, and a

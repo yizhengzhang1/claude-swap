@@ -42,8 +42,8 @@ class RealStoreWriteBlocked(Exception):
     subclass. ``pathlib.Path.mkdir(parents=True, exist_ok=True)`` catches
     ``OSError`` internally and swallows it when the target already exists —
     so an ``OSError``-based refusal into an EXISTING protected directory
-    (``cache.write_cache``, ``_atomic_b64_write``, ``_update_global_config``
-    all call ``mkdir(exist_ok=True)``) fired but never reached the caller.
+    (``_atomic_b64_write`` and ``_update_global_config`` both call
+    ``mkdir(exist_ok=True)``) fired but never reached the caller.
     A plain ``Exception`` cannot be caught by any ``except OSError:`` in the
     stdlib or this codebase, so the refusal can no longer be absorbed by
     the very shape it is meant to guard.

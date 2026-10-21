@@ -617,3 +617,63 @@ class TestFrameworkBuildWarning:
         # The symptom is that everything looks healthy, so say so.
         msg = menubar.framework_build_warning("Python", "uv", "26.6.2")
         assert "logs nothing" in msg
+
+
+class TestDetectInstallMethod:
+    def _set_prefix(self, monkeypatch, prefix: str) -> None:
+        monkeypatch.setattr("claude_swap.menubar.sys.prefix", prefix)
+        # Clear env vars by default so path-based detection runs in isolation.
+        monkeypatch.delenv("UV_TOOL_DIR", raising=False)
+        monkeypatch.delenv("PIPX_HOME", raising=False)
+
+    def test_uv_tool_default_path(self, monkeypatch):
+        self._set_prefix(monkeypatch, "/home/me/.local/share/uv/tools/claude-swap")
+        assert menubar._detect_install_method() == "uv"
+
+    def test_pipx_default_path(self, monkeypatch):
+        self._set_prefix(monkeypatch, "/home/me/.local/pipx/venvs/claude-swap")
+        assert menubar._detect_install_method() == "pipx"
+
+    def test_non_adjacent_uv_tools_does_not_match(self, monkeypatch):
+        # Both segments present but not adjacent — must not false-positive.
+        self._set_prefix(monkeypatch, "/home/me/projects/uv/some-tools/.venv")
+        assert menubar._detect_install_method() is None
+
+    def test_non_adjacent_pipx_venvs_does_not_match(self, monkeypatch):
+        self._set_prefix(monkeypatch, "/home/me/repos/pipx-clone/venvs-of-mine/.venv")
+        assert menubar._detect_install_method() is None
+
+    def test_source_checkout_returns_none(self, monkeypatch):
+        self._set_prefix(monkeypatch, "/home/me/code/claude-swap/.venv")
+        assert menubar._detect_install_method() is None
+
+    def test_mixed_case_path_detected(self, monkeypatch):
+        # Lowercasing should make matching case-insensitive (e.g. Windows).
+        self._set_prefix(monkeypatch, "/Home/Me/.local/share/UV/Tools/claude-swap")
+        assert menubar._detect_install_method() == "uv"
+
+    def test_uv_tool_dir_env_with_prefix_under_it(self, monkeypatch, tmp_path):
+        custom_root = tmp_path / "uv-tools"
+        prefix = custom_root / "claude-swap"
+        monkeypatch.setattr("claude_swap.menubar.sys.prefix", str(prefix))
+        monkeypatch.setenv("UV_TOOL_DIR", str(custom_root))
+        monkeypatch.delenv("PIPX_HOME", raising=False)
+        assert menubar._detect_install_method() == "uv"
+
+    def test_uv_tool_dir_env_set_but_prefix_elsewhere(self, monkeypatch, tmp_path):
+        custom_root = tmp_path / "uv-tools"
+        # Prefix lives somewhere else entirely — env var alone must not trigger.
+        monkeypatch.setattr(
+            "claude_swap.menubar.sys.prefix", str(tmp_path / "some-project" / ".venv")
+        )
+        monkeypatch.setenv("UV_TOOL_DIR", str(custom_root))
+        monkeypatch.delenv("PIPX_HOME", raising=False)
+        assert menubar._detect_install_method() is None
+
+    def test_pipx_home_env_with_prefix_under_it(self, monkeypatch, tmp_path):
+        custom_root = tmp_path / "pipx-home"
+        prefix = custom_root / "venvs" / "claude-swap"
+        monkeypatch.setattr("claude_swap.menubar.sys.prefix", str(prefix))
+        monkeypatch.setenv("PIPX_HOME", str(custom_root))
+        monkeypatch.delenv("UV_TOOL_DIR", raising=False)
+        assert menubar._detect_install_method() == "pipx"

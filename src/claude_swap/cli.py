@@ -21,7 +21,7 @@ from claude_swap.printer import (
     muted,
     warning,
 )
-from claude_swap.settings import load_ui_settings, load_update_settings
+from claude_swap.settings import load_ui_settings
 from claude_swap.switcher import ClaudeAccountSwitcher
 
 
@@ -64,8 +64,6 @@ _SUBCOMMAND_FLAGS = {
     "import": "--import",
     "import-usage": "--import-usage",
     "purge": "--purge",
-    "upgrade": "--upgrade",
-    "update": "--upgrade",
     "tui": "--tui",
     "watch": "--watch",
     "menubar": "--menubar",
@@ -110,8 +108,7 @@ def _run_command(argv: list[str]) -> None:
     `cswap run 2 --debug`).
 
     On POSIX this execs claude and never returns; on Windows it exits with
-    claude's return code. Either way the post-dispatch update check in
-    main() is unreachable, which is intended.
+    claude's return code.
     """
     # Everything after the first `--` is forwarded to claude verbatim.
     if "--" in argv:
@@ -1068,12 +1065,12 @@ def _menubar_service(args) -> int:
         print(f"  logs:  {result['stderr_log']}")
         print(
             dimmed(
-                "It starts at login from now on. Re-run this after a cswap "
-                "upgrade to point launchd at the new build."
+                "It starts at login from now on. Re-run this after "
+                "reinstalling claude-swap to point launchd at the new build."
             )
         )
         if unsupported:
-            # The hint printed above is about upgrades. A reinstall does not
+            # The hint printed above is about reinstalls. A reinstall does not
             # restart the service that is already running, so say that here.
             warning(
                 unsupported + "\n  Then run: cswap menubar --install-service",
@@ -1201,10 +1198,9 @@ Commands:
   %(prog)s watch                      dashboard, opened on the live watch page
   %(prog)s menubar                    macOS menu bar app
   %(prog)s menubar --install-service  keep the menu bar running via launchd
-  %(prog)s upgrade                    self-upgrade to latest
   %(prog)s purge                      remove all claude-swap data
 
-Aliases: ls=list  rm=remove  update=upgrade""",
+Aliases: ls=list  rm=remove""",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""Flags combine with subcommands:
   %(prog)s switch --strategy best           # pick the account with most quota left
@@ -1421,11 +1417,6 @@ The original flag spellings (%(prog)s --switch, %(prog)s --list, ...) keep worki
         help=argparse.SUPPRESS,
     )
     group.add_argument(
-        "--upgrade",
-        action="store_true",
-        help=argparse.SUPPRESS,
-    )
-    group.add_argument(
         "--add-token",
         metavar="TOKEN|-",
         nargs="?",
@@ -1448,7 +1439,6 @@ The original flag spellings (%(prog)s --switch, %(prog)s --list, ...) keep worki
         or args.tui
         or args.watch
         or args.menubar
-        or args.upgrade
         or args.remove_account is not None
         or args.disable_account is not None
         or args.enable_account is not None
@@ -1513,17 +1503,6 @@ The original flag spellings (%(prog)s --switch, %(prog)s --list, ...) keep worki
             "--install-service, --uninstall-service and --service-status "
             "can only be used with 'menubar'"
         )
-
-    # Self-upgrade runs before switcher init so we don't touch config/keychain
-    # just to upgrade the tool itself.
-    if args.upgrade:
-        from claude_swap.update_check import run_self_upgrade
-
-        try:
-            sys.exit(run_self_upgrade())
-        except KeyboardInterrupt:
-            print(f"\n{dimmed('Upgrade cancelled')}")
-            sys.exit(130)
 
     # Initialize switcher and dispatch under a single error handler so
     # init-time failures (e.g. MigrationError on a backup-dir collision)
@@ -1640,23 +1619,6 @@ The original flag spellings (%(prog)s --switch, %(prog)s --list, ...) keep worki
 
     if args.json and payload is not None:
         print(json.dumps(payload, indent=2))
-
-    # Passive update notification (never fails). Skipped after --purge so we
-    # don't immediately recreate <backup_root>/cache/update_check.json inside
-    # the directory we just deleted. Skipped after --upgrade as a safety guard
-    # in case the dispatch is later refactored to fall through. Skipped when
-    # `updates.check` is false, so no request goes to PyPI at all.
-    if (
-        not args.purge
-        and not args.upgrade
-        and not args.json
-        and load_update_settings(paths.get_backup_root()).check
-    ):
-        from claude_swap.update_check import check_for_update
-
-        msg = check_for_update(__version__)
-        if msg:
-            print(f"\n{muted(msg)}", file=sys.stderr)
 
 
 if __name__ == "__main__":

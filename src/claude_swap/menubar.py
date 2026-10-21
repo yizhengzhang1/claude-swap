@@ -468,6 +468,29 @@ def _macos_major(mac_ver: str | None = None) -> int | None:
     return int(head) if head.isdigit() else None
 
 
+def _detect_install_method() -> str | None:
+    """Return 'uv', 'pipx', or None if we can't tell."""
+    prefix = Path(sys.prefix)
+    parts = tuple(p.lower() for p in prefix.parts)
+    pairs = list(zip(parts, parts[1:]))
+
+    if ("uv", "tools") in pairs:
+        return "uv"
+    if ("pipx", "venvs") in pairs:
+        return "pipx"
+
+    # Env-var override: only trust if sys.prefix is actually under it.
+    for env_var, name in (("UV_TOOL_DIR", "uv"), ("PIPX_HOME", "pipx")):
+        root = os.environ.get(env_var)
+        if root:
+            try:
+                if prefix.is_relative_to(Path(root)):
+                    return name
+            except (ValueError, OSError):
+                pass
+    return None
+
+
 def framework_build_warning(
     framework=None, install_method=None, mac_ver: str | None = None
 ) -> str | None:
@@ -491,8 +514,6 @@ def framework_build_warning(
         return None
 
     if install_method is None:
-        from claude_swap.update_check import _detect_install_method
-
         install_method = _detect_install_method()
 
     if install_method == "uv":

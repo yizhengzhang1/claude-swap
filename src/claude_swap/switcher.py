@@ -1682,6 +1682,15 @@ class ClaudeAccountSwitcher:
 
         self._logger.info(f"Moved slot: {num_src} ({email}) -> {target}")
 
+    def account_for_session_dir(self, config_dir: str | Path) -> str | None:
+        """Slot whose ``cswap run`` profile is ``config_dir``; ``None`` if none is."""
+        target = Path(config_dir).expanduser().resolve()
+        data = self._get_sequence_data() or {}
+        for num, record in data.get("accounts", {}).items():
+            if self._session_dir(str(num), record.get("email", "")).resolve() == target:
+                return str(num)
+        return None
+
     def slot_for_directory(self, directory: str | Path) -> tuple[str | None, str | None]:
         """Resolve a directory to its mapped account slot, for `cswap run`.
 
@@ -2068,22 +2077,25 @@ class ClaudeAccountSwitcher:
         # resolve_account migrates org fields and hard-errors on ambiguity.
         account_num, email, _ = self.resolve_account(identifier)
 
-        data = self._get_sequence_data() or {}
-        record = data.get("accounts", {}).get(account_num)
-        if not record:
-            raise AccountNotFoundError(f"Account-{account_num} does not exist")
-
         verb = "disabled" if disabled else "enabled"
-        if bool(record.get("disabled")) == disabled:
-            print(dimmed(f"Account-{account_num} ({email}) is already {verb}."))
-            return
+        # Under the switch lock: the StopFailure hook disables accounts while
+        # `cswap auto` may be mid-switch, and either write would drop the other.
+        with FileLock(self.lock_file):
+            data = self._get_sequence_data() or {}
+            record = data.get("accounts", {}).get(account_num)
+            if not record:
+                raise AccountNotFoundError(f"Account-{account_num} does not exist")
 
-        if disabled:
-            record["disabled"] = True
-        else:
-            record.pop("disabled", None)
-        data["lastUpdated"] = get_timestamp()
-        self._write_json(self.sequence_file, data)
+            if bool(record.get("disabled")) == disabled:
+                print(dimmed(f"Account-{account_num} ({email}) is already {verb}."))
+                return
+
+            if disabled:
+                record["disabled"] = True
+            else:
+                record.pop("disabled", None)
+            data["lastUpdated"] = get_timestamp()
+            self._write_json(self.sequence_file, data)
         self._logger.info(f"{verb.capitalize()} account {account_num}: {email}")
 
         print(f"{accent(verb.capitalize())} Account-{account_num} ({email}).")

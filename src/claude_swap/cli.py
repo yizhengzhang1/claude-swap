@@ -6,7 +6,11 @@ import argparse
 import json
 import math
 import os
+import shutil
+import subprocess
 import sys
+import tempfile
+from pathlib import Path
 
 from claude_swap import __version__, paths, printer
 from claude_swap.exceptions import ClaudeSwitchError
@@ -682,6 +686,127 @@ def _print_threshold_table(switcher: ClaudeAccountSwitcher) -> None:
         print(f"  Account-{num}  {value:g}%")
 
 
+# StopFailure `error` values that mean the account itself is unusable, not
+# that the request was: the org cut its subscription off from Claude Code
+# (HTTP 403). Usage readings never show this, so it is caught here instead.
+_BLOCKED_ACCOUNT_ERRORS = frozenset({"oauth_org_not_allowed"})
+# The same block as `claude -p --output-format json` reports it.
+_BLOCKED_API_ERROR_CODES = frozenset({"oauth_not_allowed_for_organization"})
+# Set on the probe's `claude`, so its own StopFailure cannot re-enter the hook.
+_HOOK_PROBE_ENV = "CSWAP_HOOK_PROBE"
+
+
+def _default_login_blocked() -> bool:
+    """Whether the default login is org-blocked right now, by one real turn.
+
+    A blocked request costs no quota, so only a mistaken suspicion spends a
+    one-word haiku reply. Settings are not loaded: no hooks, no plugins.
+    """
+    from claude_swap.session import AUTH_OVERRIDE_ENV_VARS
+
+    claude = shutil.which("claude")
+    if claude is None:
+        return False
+    env = {k: v for k, v in os.environ.items() if k not in AUTH_OVERRIDE_ENV_VARS}
+    env[_HOOK_PROBE_ENV] = "1"
+    try:
+        proc = subprocess.run(
+            [claude, "-p", "ok", "--model", "haiku", "--output-format", "json",
+             "--setting-sources", "", "--no-session-persistence", "--strict-mcp-config"],
+            env=env, cwd=tempfile.gettempdir(), stdin=subprocess.DEVNULL,
+            capture_output=True, text=True, timeout=45,
+        )
+        result = json.loads(proc.stdout)
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return False
+    return (
+        isinstance(result, dict)
+        and result.get("api_error_status") == 403
+        and result.get("api_error_code") in _BLOCKED_API_ERROR_CODES
+    )
+
+
+def _hook_command(argv: list[str]) -> None:
+    """Handle `cswap hook stop-failure`, Claude Code's StopFailure hook.
+
+    Reads the hook payload on stdin. When the failed turn ran on an account
+    its org has blocked, that account is disabled and, if it is the active
+    login, rotated away from. Any other error, or a session on a profile cswap
+    does not manage, is a silent no-op.
+
+    A `cswap run` profile names its slot exactly. The default profile only
+    names whatever login is live when the hook runs, which a concurrent
+    failure's hook or `cswap auto` may already have switched, so that login is
+    probed before it is blamed.
+    """
+    parser = argparse.ArgumentParser(
+        prog="cswap hook",
+        description=(
+            "Entry points for Claude Code hooks. stop-failure disables the "
+            "account a failed turn ran on when its org has blocked Claude "
+            "Code access, and switches away if it is the active login."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Register in Claude Code settings.json:
+  "hooks": {"StopFailure": [{"hooks": [
+    {"type": "command", "command": "cswap hook stop-failure"}]}]}
+        """,
+    )
+    parser.add_argument("event", choices=["stop-failure"])
+    parser.add_argument("--debug", action="store_true", help="Enable debug logging")
+    args = parser.parse_args(argv)
+
+    from claude_swap.session import AUTH_OVERRIDE_ENV_VARS
+
+    if os.environ.get(_HOOK_PROBE_ENV):
+        return
+    try:
+        payload = json.load(sys.stdin)
+    except (OSError, ValueError):
+        return
+    if not isinstance(payload, dict) or payload.get("error") not in _BLOCKED_ACCOUNT_ERRORS:
+        return
+    # The failed request authenticated with an env token, not a cswap slot.
+    if any(os.environ.get(var) for var in AUTH_OVERRIDE_ENV_VARS):
+        return
+
+    # Hooks inherit the session's CLAUDE_CONFIG_DIR. It names the failed
+    # session's profile, but the switch below must act on the default one.
+    config_dir = os.environ.pop("CLAUDE_CONFIG_DIR", None)
+    try:
+        switcher = ClaudeAccountSwitcher(debug=args.debug)
+        _guard_root(switcher)
+        if config_dir and (
+            Path(config_dir).expanduser().resolve()
+            != paths.get_default_claude_config_home().resolve()
+        ):
+            account_num = switcher.account_for_session_dir(config_dir)
+        else:
+            account_num = switcher.current_account_number()
+            if account_num is not None and not _default_login_blocked():
+                return
+        if account_num is None:
+            return
+
+        warning(
+            f"Account-{account_num} ({switcher.account_email(account_num)}): "
+            "organization has disabled Claude Code access"
+        )
+        switcher.set_account_disabled(account_num, True)
+        if (
+            switcher.current_account_number() == account_num
+            and switcher.switchable_account_numbers()
+        ):
+            switcher.switch(strategy="next-available")
+            # Every other account at its limit still beats one that is blocked.
+            if switcher.current_account_number() == account_num:
+                switcher.switch()
+    except ClaudeSwitchError as e:
+        error(f"Error: {e}")
+        sys.exit(1)
+
+
 def _auto_command(argv: list[str]) -> None:
     """Handle `cswap auto [--once] [--json] [...]`.
 
@@ -1147,6 +1272,9 @@ def main() -> None:
     if argv and argv[0] == "move":
         _move_command(argv[1:])
         return
+    if argv and argv[0] == "hook":
+        _hook_command(argv[1:])
+        return
 
     # Bare `cswap` in an interactive terminal opens the TUI dashboard (like
     # lazygit/k9s). TTY-gated on both ends so scripts and pipes keep getting
@@ -1189,6 +1317,7 @@ Commands:
   %(prog)s swap <a> <b>               exchange two accounts' slot numbers
   %(prog)s move <a> <slot>            assign an account to a slot (swaps if taken)
   %(prog)s auto                       auto-switch when nearing rate limits
+  %(prog)s hook stop-failure          StopFailure hook: disable a blocked account
   %(prog)s config [set KEY VALUE]     show or change settings (settings.json)
   %(prog)s unclaimed [--purge ID]     list or drop stashed credential entries
   %(prog)s export <path>              export accounts

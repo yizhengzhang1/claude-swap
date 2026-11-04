@@ -29,7 +29,11 @@ from claude_swap.autoswitch import (
     UnquarantineEvent,
     pct_label,
 )
-from claude_swap.json_output import USAGE_FOREIGN_CREDENTIAL, USAGE_TOKEN_EXPIRED
+from claude_swap.json_output import (
+    USAGE_FOREIGN_CREDENTIAL,
+    USAGE_STATUSLINE_PENDING,
+    USAGE_TOKEN_EXPIRED,
+)
 from claude_swap.usage_store import FetchRecord, UsageEntry
 from claude_swap.models import Platform
 from claude_swap.settings import AutoSwitchSettings, settings_path
@@ -189,6 +193,17 @@ def harness(temp_home: Path) -> EngineHarness:
     h.seed(1, "a@example.com")
     h.seed(2, "b@example.com")
     h.seed(3, "c@example.com")
+    h.make_live("a@example.com", 1)
+    return h
+
+
+@pytest.fixture
+def pair(temp_home: Path) -> EngineHarness:
+    """Two accounts only. A third with no usage in the tick reads as
+    unreadable, which an over-the-line tick falls back onto."""
+    h = EngineHarness(temp_home)
+    h.seed(1, "a@example.com")
+    h.seed(2, "b@example.com")
     h.make_live("a@example.com", 1)
     return h
 
@@ -403,26 +418,48 @@ class TestDecisionTable:
         reasons = [e.reason for e in h.events if isinstance(e, NoSwitchEvent)]
         assert reasons == ["below-threshold"]
 
-    def test_mixed_unknown_and_exhausted_is_not_all_exhausted(self, harness):
-        # One candidate at its limit, the other unreadable this tick: usage
-        # could recover any moment, so no long reset-sleep.
+    def test_over_line_with_readable_spent_falls_back_to_unreadable(self, harness):
+        # Active over its line, the readable candidate at its limit, the other
+        # unreadable this tick: the unreadable one may have quota, the active
+        # is about to have none — switch onto it, flagged as unverified.
         outcome = harness.tick_with_usage({
             "1": _usage(95),
             "2": _usage(100, "2026-07-03T12:00:00Z"),
             "3": None,
         })
+        assert outcome is TickOutcome.SWITCHED
+        assert harness.active_number() == 3
+        assert not any(isinstance(e, AllExhaustedEvent) for e in harness.events)
+        switch = next(e for e in harness.events if isinstance(e, SwitchEvent))
+        assert switch.trigger == "proactive"
+        assert switch.target_usage_unknown is True
+
+    def test_mixed_unknown_and_exhausted_failover_is_not_all_exhausted(
+        self, harness
+    ):
+        # Failover keeps ranking readable candidates only: one at its limit,
+        # the other unreadable is no target, but usage could recover any
+        # moment, so no long reset-sleep.
+        usage = {
+            "1": None,
+            "2": _usage(100, "2026-07-03T12:00:00Z"),
+            "3": None,
+        }
+        for _ in range(3):
+            outcome = harness.tick_with_usage(usage)
         assert outcome is TickOutcome.BLOCKED
+        assert harness.active_number() == 1
         assert not any(isinstance(e, AllExhaustedEvent) for e in harness.events)
         reasons = [e.reason for e in harness.events if isinstance(e, NoSwitchEvent)]
-        assert reasons == ["no-qualifying-candidate"]
+        assert reasons[-1] == "no-qualifying-candidate"
         assert harness.engine._sleep_until_ts is None
         delay = harness.engine._next_delay(outcome)
         assert delay <= 1.1 * harness.settings.interval_seconds
 
-    def test_stale_beyond_trust_blocks_all_exhausted(self, harness):
+    def test_stale_beyond_trust_is_unreadable_not_exhausted(self, harness):
         # One candidate exhausted on trusted-stale data, the other's data aged
-        # past every trust window (no failures, no plan — just overdue): the
-        # unknown candidate could be viable, so no long reset-sleep.
+        # past every trust window (no failures, no plan — just overdue): that
+        # one is unknown, not exhausted, so the over-the-line tick takes it.
         now = harness.clock.now
         reset = "2026-07-05T12:00:00Z"
         outcome = harness.tick_with_entries({
@@ -433,10 +470,9 @@ class TestDecisionTable:
             ),
             "3": UsageEntry(last_good=_usage(10), fetched_at=now - 400, age_s=400.0),
         })
-        assert outcome is TickOutcome.BLOCKED
+        assert outcome is TickOutcome.SWITCHED
+        assert harness.active_number() == 3
         assert not any(isinstance(e, AllExhaustedEvent) for e in harness.events)
-        reasons = [e.reason for e in harness.events if isinstance(e, NoSwitchEvent)]
-        assert reasons == ["no-qualifying-candidate"]
 
     def test_trusted_stale_exhausted_set_still_fires_all_exhausted(self, harness):
         # Every candidate at its limit, known only through trusted-stale data
@@ -608,14 +644,56 @@ class TestDecisionTable:
         assert harness.tick_with_usage(unknown) is TickOutcome.NO_ACTION
         assert harness.active_number() == 1
 
-    def test_all_candidates_unknown_is_no_comparison(self, harness):
-        outcome = harness.tick_with_usage({
-            "1": _usage(95), "2": None, "3": None,
-        })
+    def test_failover_with_all_candidates_unknown_is_no_comparison(self, harness):
+        # The unreadable fallback is for an active known to be over its line;
+        # an active whose own usage is unknown has nothing to escape from.
+        unknown = {"1": None, "2": None, "3": None}
+        for _ in range(3):
+            outcome = harness.tick_with_usage(unknown)
         assert outcome is TickOutcome.BLOCKED
-        assert [e.reason for e in harness.events if isinstance(e, NoSwitchEvent)] == [
-            "no-comparison"
-        ]
+        assert harness.active_number() == 1
+        reasons = [e.reason for e in harness.events if isinstance(e, NoSwitchEvent)]
+        assert reasons[-1] == "no-comparison"
+
+    def test_at_limit_with_all_candidates_unknown_switches_blind(self, harness):
+        # Live 2026-11-04: an exhausted OAuth active held "no-comparison"
+        # while two never-used setup-token slots had no statusline reading.
+        outcome = harness.tick_with_usage({
+            "1": _usage(100), "2": None, "3": USAGE_STATUSLINE_PENDING,
+        })
+        assert outcome is TickOutcome.SWITCHED
+        assert harness.active_number() == 2  # first in rotation order
+        switch = next(e for e in harness.events if isinstance(e, SwitchEvent))
+        assert switch.trigger == "at-limit"
+        assert switch.to_json()["targetUsageUnknown"] is True
+        assert switch.human().endswith("(at-limit, target usage unknown)")
+
+    def test_blind_switch_onto_pending_setup_token_holds(self, temp_home):
+        # Landing on a slot whose usage only the statusline can report: the
+        # next ticks hold it until a reading lands, never bounce back.
+        h = EngineHarness(temp_home, cooldown_seconds=0.0)
+        h.seed(1, "a@example.com")
+        h.seed(2, "setup-token-2@token.local")
+        h.seed(3, "c@example.com")
+        h.make_live("a@example.com", 1)
+        assert h.tick_with_usage({
+            "1": _usage(100),
+            "2": USAGE_STATUSLINE_PENDING,
+            "3": _usage(100),
+        }) is TickOutcome.SWITCHED
+        assert h.active_number() == 2
+        h.events.clear()
+        for _ in range(5):
+            h.clock.advance(60)
+            assert h.tick_with_usage({
+                "1": _usage(0),  # the account we left, back to full
+                "2": USAGE_STATUSLINE_PENDING,
+                "3": _usage(100),
+            }) is TickOutcome.NO_ACTION
+        assert h.active_number() == 2
+        assert not any(isinstance(e, SwitchEvent) for e in h.events)
+        reasons = {e.reason for e in h.events if isinstance(e, NoSwitchEvent)}
+        assert reasons == {"active-usage-pending"}
 
     def test_tie_resolves_to_earliest_slot(self, harness):
         outcome = harness.tick_with_usage({
@@ -4382,8 +4460,8 @@ class TestAllAboveHeadroomDoesNotFlap:
             "and a half over one holding nine"
         )
 
-    def test_a_burn_walk_settles_instead_of_oscillating(self, harness):
-        """A burn walk settles instead of oscillating.
+    def test_a_burn_walk_settles_instead_of_oscillating(self, pair):
+        """A-B-A under burn is the fleet changing regime, not a gate leaking.
 
         Only the active burns, both resets days out. The margin is measured
         against the active, and burn changes the active, so on its own a pair
@@ -4394,14 +4472,14 @@ class TestAllAboveHeadroomDoesNotFlap:
         seen = []
         pct = {"1": 96.0, "2": 92.0}          # 4.0 and 8.0 points
         for _ in range(24):
-            harness.tick_with_usage({
-                "1": _usage(pct["1"], self._days_out(harness, 20)),
-                "2": _usage(pct["2"], self._days_out(harness, 80)),
+            pair.tick_with_usage({
+                "1": _usage(pct["1"], self._days_out(pair, 20)),
+                "2": _usage(pct["2"], self._days_out(pair, 80)),
             })
-            active = harness.active_number()
+            active = pair.active_number()
             seen.append(active)
             pct[str(active)] = min(99.95, pct[str(active)] + 0.25)   # burn
-            harness.clock.advance(301.0)
+            pair.clock.advance(301.0)
 
         moves = [n for i, n in enumerate(seen) if i == 0 or n != seen[i - 1]]
         assert len(moves) <= 2, (
@@ -4445,8 +4523,8 @@ class TestAllAboveHeadroomDoesNotFlap:
         )
         assert harness.active_number() == 2
 
-    def test_a_burn_walk_never_returns_to_what_it_left(self, harness):
-        """A walk on a pair that starts level ends, however it moves.
+    def test_a_burn_walk_never_returns_to_what_it_left(self, pair):
+        """The axis can flip more than once, and nothing bounded how often.
 
         Measured before the no-return bar, only the active burning at 0.5
         pts/tick, both resets days out, 24 ticks:
@@ -4479,14 +4557,14 @@ class TestAllAboveHeadroomDoesNotFlap:
         # ring walks further before it comes back — and 24 ticks caught this
         # shape mid-walk.
         for _ in range(60):
-            harness.tick_with_usage({
-                "1": _usage(pct["1"], self._days_out(harness, 500)),
-                "2": _usage(pct["2"], self._days_out(harness, 400)),
+            pair.tick_with_usage({
+                "1": _usage(pct["1"], self._days_out(pair, 500)),
+                "2": _usage(pct["2"], self._days_out(pair, 400)),
             })
-            active = harness.active_number()
+            active = pair.active_number()
             seen.append(active)
             pct[str(active)] = min(99.95, pct[str(active)] + 0.5)
-            harness.clock.advance(301.0)
+            pair.clock.advance(301.0)
 
         moves = [n for i, n in enumerate(seen) if i == 0 or n != seen[i - 1]]
         # SETTLING is the property, not a move count. `len(moves) <= 4` was

@@ -27,7 +27,11 @@ activation the target's token is *freshened* (refreshed if it expires within
 under-lock re-read sees a fresh token and aborts its own refresh); a target
 whose refresh token is dead gets quarantined instead of activated. When the
 active account's own usage becomes unreadable for ``unhealthy_ticks``
-consecutive ticks, the engine fails over to any healthy candidate.
+consecutive ticks, the engine fails over to any healthy candidate. With the
+active account at or over its line and no readable candidate qualifying, it
+falls back to candidates whose usage it cannot read (a setup-token slot with
+no statusline reading yet), in rotation order, rather than stay on a spent
+account.
 
 Cooldown and quarantine persist in ``<backup_root>/autoswitch_state.json``
 (so cron-driven ``cswap auto --once`` ticks behave across processes), mutated
@@ -53,6 +57,7 @@ from claude_swap import oauth, poll_policy, statusline_usage
 from claude_swap.exceptions import ClaudeSwitchError
 from claude_swap.json_output import (
     SCHEMA_VERSION,
+    USAGE_RELOGIN_REQUIRED,
     USAGE_STATUSLINE_PENDING,
     USAGE_TOKEN_EXPIRED,
 )
@@ -352,15 +357,22 @@ class SwitchEvent(AutoSwitchEvent):
     to_ref: dict | None
     warnings: list[str] = field(default_factory=list)
     dry_run: bool = False
+    # The target was chosen without a readable usage reading (the over-the-
+    # line fallback onto unreadable candidates). Additive field, emitted only
+    # when set.
+    target_usage_unknown: bool = False
 
     def _fields(self) -> dict:
-        return {
+        fields = {
             "trigger": self.trigger,
             "from": self.from_ref,
             "to": self.to_ref,
             "warnings": self.warnings,
             "dryRun": self.dry_run,
         }
+        if self.target_usage_unknown:
+            fields["targetUsageUnknown"] = True
+        return fields
 
     def human(self) -> str:
         src = (
@@ -372,7 +384,8 @@ class SwitchEvent(AutoSwitchEvent):
             else "?"
         )
         prefix = "[dry-run] would switch" if self.dry_run else "Switched"
-        return f"{prefix} {src} -> {dst} ({self.trigger})"
+        note = ", target usage unknown" if self.target_usage_unknown else ""
+        return f"{prefix} {src} -> {dst} ({self.trigger}{note})"
 
 
 @dataclass(frozen=True)
@@ -1490,6 +1503,39 @@ class AutoSwitchEngine:
             # nudge — those API-key accounts have no weekly window to consume.
             ordered = api_key_candidates
 
+        blind = False
+        if not ordered and trigger in ("at-limit", "proactive"):
+            # The active account is at/over its line and nothing readable
+            # qualifies. A candidate whose usage cannot be read this tick — a
+            # setup-token slot no statusline has reported for yet, a fetch
+            # that failed — may well have quota; staying on the spent account
+            # certainly does not. Rotation order, through the same freshen
+            # loop. A dead lineage is not "unknown". The no-return bar still
+            # applies, or a failover away from an unreadable account is undone
+            # blind every cooldown; `recovered` is False because release reads
+            # the barred account's headroom, which these never have. After the
+            # move, an unread setup-token active holds (active-usage-pending)
+            # and failover never lands on an account with no headroom left.
+            no_return = self._no_return_account(
+                trigger,
+                state,
+                headroom,
+                active_headroom,
+                False,
+                settings,
+                current,
+                usage=usage,
+                thresholds=thresholds,
+            )
+            ordered = [
+                n
+                for n in oauth_candidates
+                if headroom.get(n) is None
+                and n != no_return
+                and usage.get(n) != USAGE_RELOGIN_REQUIRED
+            ]
+            blind = bool(ordered)
+
         if not ordered:
             if priority_active_ready:
                 self._emit(NoSwitchEvent(
@@ -1632,7 +1678,7 @@ class AutoSwitchEngine:
             if self.dry_run:
                 # Dry-run stops at the decision: no token refresh, no
                 # quarantine writes — freshening is a mutation.
-                return self._perform(num, email, trigger, left_snapshot)
+                return self._perform(num, email, trigger, left_snapshot, blind)
             status = self._freshen_target(num, email)
             if status == "identity-conflict":
                 # The slot's credential is alive but belongs to a different
@@ -1663,7 +1709,7 @@ class AutoSwitchEngine:
                 continue
             if status == "skip-live-session":
                 continue
-            return self._perform(num, email, trigger, left_snapshot)
+            return self._perform(num, email, trigger, left_snapshot, blind)
 
         if systemic or transient_failure:
             self._emit(
@@ -2552,6 +2598,7 @@ class AutoSwitchEngine:
         email: str,
         trigger: str,
         left: tuple[float | None, float],
+        blind: bool,
     ) -> TickOutcome:
         if self.dry_run:
             current = self.switcher.current_account_number()
@@ -2562,6 +2609,7 @@ class AutoSwitchEngine:
                     from_ref=_ref(current, current_email) if current else None,
                     to_ref=_ref(number, email),
                     dry_run=True,
+                    target_usage_unknown=blind,
                 )
             )
             return TickOutcome.SWITCHED
@@ -2617,6 +2665,7 @@ class AutoSwitchEngine:
                 from_ref=result.get("from"),
                 to_ref=result.get("to"),
                 warnings=result.get("warnings", []),
+                target_usage_unknown=blind,
             )
         )
         return TickOutcome.SWITCHED

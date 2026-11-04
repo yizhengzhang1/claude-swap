@@ -1523,7 +1523,21 @@ class AutoSwitchEngine:
             ordered = api_key_candidates
 
         blind = False
-        if not ordered and trigger in ("at-limit", "proactive"):
+        if not ordered and (
+            trigger == "at-limit"
+            or (
+                trigger == "proactive"
+                # A readable candidate under its own line that only failed the
+                # hysteresis margin (or the no-return bar) beats a blind pick:
+                # hold, and the at-limit escape takes it.
+                and not any(
+                    (b := self._binding(usage.get(n), settings, thresholds[n]))
+                    is not None
+                    and not b.over
+                    for n in oauth_candidates
+                )
+            )
+        ):
             # The active account is at/over its line and nothing readable
             # qualifies. A candidate whose usage cannot be read this tick — a
             # setup-token slot no statusline has reported for yet, a fetch

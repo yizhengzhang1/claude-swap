@@ -434,6 +434,14 @@ class TestDecisionTable:
         assert switch.trigger == "proactive"
         assert switch.target_usage_unknown is True
 
+    def test_proactive_holds_for_readable_candidate_under_its_line(self, harness):
+        usage = {"1": _usage(95), "2": _usage(88), "3": None}
+        assert harness.tick_with_usage(usage) is not TickOutcome.SWITCHED
+        assert harness.active_number() == 1
+        usage["1"] = _usage(100, "2026-07-03T12:00:00Z")
+        assert harness.tick_with_usage(usage) is TickOutcome.SWITCHED
+        assert harness.active_number() == 2
+
     def test_mixed_unknown_and_exhausted_failover_is_not_all_exhausted(
         self, harness
     ):

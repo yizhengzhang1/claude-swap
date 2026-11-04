@@ -695,6 +695,24 @@ class TestDecisionTable:
         reasons = {e.reason for e in h.events if isinstance(e, NoSwitchEvent)}
         assert reasons == {"active-usage-pending"}
 
+    def test_blind_landing_that_stays_unreadable_holds_over_the_line(
+        self, harness
+    ):
+        # Both others OAuth and never readable (a usage endpoint under 429):
+        # failing back onto the 95% account, then blind onto the other one
+        # every cooldown, walked 1->2->1->3->1 without end.
+        for _ in range(20):
+            harness.tick_with_usage({"1": _usage(95), "2": None, "3": None})
+            harness.clock.advance(61.0)
+        assert harness.active_number() == 2
+        switches = [e for e in harness.events if isinstance(e, SwitchEvent)]
+        assert [(s.trigger, s.target_usage_unknown) for s in switches] == [
+            ("proactive", True)
+        ]
+        # Back under its line, the account we left is a landing again.
+        harness.tick_with_usage({"1": _usage(10), "2": None, "3": None})
+        assert harness.active_number() == 1
+
     def test_tie_resolves_to_earliest_slot(self, harness):
         outcome = harness.tick_with_usage({
             "1": _usage(95), "2": _usage(30), "3": _usage(30),

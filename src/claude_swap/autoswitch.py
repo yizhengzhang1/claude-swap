@@ -31,7 +31,8 @@ consecutive ticks, the engine fails over to any healthy candidate. With the
 active account at or over its line and no readable candidate qualifying, it
 falls back to candidates whose usage it cannot read (a setup-token slot with
 no statusline reading yet), in rotation order, rather than stay on a spent
-account.
+account; a failover off such a landing lands only under every line, so it
+cannot fall back onto the spent account and restart the walk.
 
 Cooldown and quarantine persist in ``<backup_root>/autoswitch_state.json``
 (so cron-driven ``cswap auto --once`` ticks behave across processes), mutated
@@ -1458,6 +1459,24 @@ class AutoSwitchEngine:
             thresholds=thresholds,
         )
 
+        if (
+            trigger == "failover"
+            and state.get("lastSwitchBlind") is True
+            and str(state.get("lastSwitchTo")) == current
+        ):
+            # The unreadable active is where the over-the-line fallback below
+            # put us. Failing back onto an account still over its own line
+            # restarts the walk — over the line, blind onto the next
+            # unreadable, fail back — and the no-return bar remembers one
+            # account, so three make a loop. Land under every line, or hold.
+            ordered = [
+                n
+                for n in ordered
+                if (b := self._binding(usage.get(n), settings, thresholds[n]))
+                is not None
+                and not b.over
+            ]
+
         if (trigger == "consume-first" or priority_mode) and ordered:
             # Two-phase commit: the provisional pick may have ridden a
             # snapshot up to CANDIDATE_MAX_INTERVAL_S stale — consume-first
@@ -1511,11 +1530,12 @@ class AutoSwitchEngine:
             # that failed — may well have quota; staying on the spent account
             # certainly does not. Rotation order, through the same freshen
             # loop. A dead lineage is not "unknown". The no-return bar still
-            # applies, or a failover away from an unreadable account is undone
-            # blind every cooldown; `recovered` is False because release reads
-            # the barred account's headroom, which these never have. After the
+            # applies, so a failover away from an unreadable account is not
+            # undone blind; `recovered` is False because release reads the
+            # barred account's headroom, which these never have. After the
             # move, an unread setup-token active holds (active-usage-pending)
-            # and failover never lands on an account with no headroom left.
+            # and an unreadable OAuth active fails over only to an account
+            # under every line (`lastSwitchBlind`, above).
             no_return = self._no_return_account(
                 trigger,
                 state,
@@ -2657,6 +2677,7 @@ class AutoSwitchEngine:
             # nulls then runs the wrong legs. Record it directly so the
             # reader never has to guess.
             state["leftTrigger"] = trigger
+            state["lastSwitchBlind"] = blind
             atomic_write_json(self.state_path, state)
 
         self._emit(

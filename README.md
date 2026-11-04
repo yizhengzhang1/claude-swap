@@ -125,7 +125,7 @@ The weekly ones exist because weekly quota left unused at its reset is lost.
 - `--model Fable` folds that model's weekly limit into the decision, for when you hit a per-model limit before the account-wide ones. Names are the per-model rows in `cswap list` (e.g. `Fable: 100%`), matched case-insensitively.
 - Accounts with no 5-hour window (Ultra) are judged on their 7-day and `--model` windows alone.
 - If a usage check fails it keeps using the last-known numbers for a limited time while it retries, and an expired token on an idle machine makes it hold rather than fail over.
-- With the active account at or over its line and no candidate with readable usage qualifying, it moves to one whose usage it cannot read (typically a setup-token account no statusline has reported for yet), in rotation order. The switch line then says `(at-limit, target usage unknown)`; `--json` adds `"targetUsageUnknown": true`.
+- With the active account at or over its line and no candidate with readable usage qualifying, it moves to one whose usage it cannot read (typically a setup-token account no statusline has reported for yet), in rotation order. The switch line then says `(at-limit, target usage unknown)`; `--json` adds `"targetUsageUnknown": true`. If an account reached this way stays unreadable long enough to fail over, it fails over only to an account back under its line, and otherwise stays put.
 - An account whose refresh token has died is quarantined and reported until you [re-add it](#refresh-expired-tokens).
 - API-key accounts are never rotated onto unless you pass `--include-api-key-accounts`.
 

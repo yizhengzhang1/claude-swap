@@ -1523,7 +1523,9 @@ class AutoSwitchEngine:
             ordered = api_key_candidates
 
         blind = False
-        if not ordered and (
+        # priority-consume-first never lands on an account at or over its
+        # line, and a blind pick could be one: it holds instead.
+        if not ordered and not priority_mode and (
             trigger == "at-limit"
             or (
                 trigger == "proactive"
@@ -1543,7 +1545,9 @@ class AutoSwitchEngine:
             # setup-token slot no statusline has reported for yet, a fetch
             # that failed — may well have quota; staying on the spent account
             # certainly does not. Rotation order, through the same freshen
-            # loop. A dead lineage is not "unknown". The no-return bar still
+            # loop. A dead lineage is not "unknown", and neither is a reading
+            # the ranking declines to use (an incomplete header probe): its
+            # visible windows can show the account spent. The no-return bar still
             # applies, so a failover away from an unreadable account is not
             # undone blind; `recovered` is False because release reads the
             # barred account's headroom, which these never have. After the
@@ -1565,6 +1569,7 @@ class AutoSwitchEngine:
                 n
                 for n in oauth_candidates
                 if headroom.get(n) is None
+                and not isinstance(usage.get(n), dict)
                 and n != no_return
                 and usage.get(n) != USAGE_RELOGIN_REQUIRED
             ]

@@ -5927,13 +5927,14 @@ class ClaudeAccountSwitcher:
             stored = active_value
         else:
             stored = backup
-        if self._is_statusline_slot(
+        if not self._usage_settings().header_probe and self._is_statusline_slot(
             (int(num), email, "", org, is_active, stored, ""), backup
         ):
-            # The collectors never strike a setup-token slot (it is read from
-            # the statusline cache, not fetched), so a strike row left from
-            # before is no quarantine to heal: replacing the slot without
-            # --force would discard a working token.
+            # With usage.headerProbe off the collectors never strike a
+            # setup-token slot (it is read from the statusline cache, not
+            # fetched), so a strike row left from before is no quarantine to
+            # heal: replacing the slot without --force would discard a working
+            # token.
             return False
         return self._entry_token_dead(entry, num, email, stored, is_active)
 

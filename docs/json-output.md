@@ -27,6 +27,7 @@ These apply to `list` rows and the managed active row from `status --json`. All 
 | `lastGoodUsage`, `lastGoodFetchedAt`, `lastGoodAgeSeconds` | `usage` is null but a last-known measurement exists: data too old to drive a decision (`usageStatus` stays `unavailable`), or a row in a non-`ok` state such as `token_expired` | Preserves the human display without making the account actionable. |
 | `usageError` | `usage` is null and nothing else explains it (`usageStatus` is `unavailable`) | The last fetch failure by kind (e.g. `http-429`, `timeout`). |
 | `usageRetryAt` | the cache is backing off from that failure | The time of the next attempt. |
+| `usageSource` | the slot is a setup-token whose usage is read from the Claude Code statusline cache (`usage.headerProbe` off) | `"statusline"`. `usageFetchedAt`/`usageAgeSeconds` are the reading's capture time and the row stays `ok` at any age; `usageStatus` is `statusline_pending` until a first reading exists. |
 | `disabled` | the account is held out of rotation with `cswap disable` | `true`; absent otherwise. |
 | `threshold` | a per-account threshold is set with `cswap threshold` | e.g. `85.0`; absent otherwise, so a fleet that never sets a policy emits rows identical to before. |
 | `alias` | an alias is set with `cswap alias` | e.g. `"dev"`; accounts without one omit the key. |
@@ -48,4 +49,4 @@ The two projections stay `--json`-only, since a linear projection is too rough t
 
 ## `cswap auto --json`
 
-`cswap auto --json` emits an event stream instead: one JSON object per line (`{"schemaVersion":1,"event":"switch","ts":…, …}`) with kinds like `poll`, `switch`, `no-switch`, `account-quarantined`, `all-exhausted`, `error`. The contract is additive: new kinds and fields may appear, so scripts should ignore unknown ones.
+`cswap auto --json` emits an event stream instead: one JSON object per line (`{"schemaVersion":1,"event":"switch","ts":…, …}`) with kinds like `poll`, `switch`, `no-switch`, `account-quarantined`, `all-exhausted`, `error`. A `switch` onto an account whose usage could not be read carries `"targetUsageUnknown": true`. The contract is additive: new kinds and fields may appear, so scripts should ignore unknown ones.

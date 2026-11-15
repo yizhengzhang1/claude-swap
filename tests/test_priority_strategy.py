@@ -83,6 +83,16 @@ def test_no_above_threshold_escape_even_at_the_hard_limit(temp_home, active_pct)
     assert not any(isinstance(e, SwitchEvent) for e in h.events)
 
 
+def test_no_blind_escape_onto_an_unreadable_account(temp_home):
+    h = fleet(temp_home)
+    values = usage(h, pcts=(100, 90, 95, 99))
+    values["4"] = None
+    assert h.tick_with_usage(values) is TickOutcome.BLOCKED
+    assert h.active_number() == 1
+    reasons = [e.reason for e in h.events if isinstance(e, NoSwitchEvent)]
+    assert reasons == ["no-qualifying-candidate"]
+
+
 def test_failover_also_obeys_the_cutoffs(temp_home):
     h = fleet(temp_home, unhealthy_ticks=1)
     values = usage(h, pcts=(0, 90, 95, 99))

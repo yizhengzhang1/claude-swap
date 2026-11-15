@@ -676,6 +676,17 @@ class TestDecisionTable:
         assert switch.to_json()["targetUsageUnknown"] is True
         assert switch.human().endswith("(at-limit, target usage unknown)")
 
+    def test_incomplete_header_reading_is_not_a_blind_target(self, harness):
+        # A header-probe reading the ranking declines (no 7d window) can still
+        # show the account spent, so it is not an unread account.
+        outcome = harness.tick_with_usage({
+            "1": _usage(100),
+            "2": _header_usage(five_hour={"pct": 99.0}),
+            "3": USAGE_STATUSLINE_PENDING,
+        })
+        assert outcome is TickOutcome.SWITCHED
+        assert harness.active_number() == 3
+
     def test_blind_switch_onto_pending_setup_token_holds(self, temp_home):
         # Landing on a slot whose usage only the statusline can report: the
         # next ticks hold it until a reading lands, never bounce back.

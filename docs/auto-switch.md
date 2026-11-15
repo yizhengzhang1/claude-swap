@@ -57,6 +57,8 @@ It fails safe: if a usage check errors it keeps trusting the last-known numbers,
 
 An account whose refresh token has died is quarantined and reported until you either log in with it and re-run `cswap add --slot N`, or replace its stored credentials from a known-good export — a plain `cswap import backup.cswap` replaces dead-token slots on its own (`--force` is still required to replace other existing accounts; note a stale export can carry an already-superseded token). API-key accounts are never rotated onto unless you pass `--include-api-key-accounts`.
 
+A setup-token account's statusline reading misses the usage of sessions that render no statusline. `cswap hook stop-failure` covers the limit itself: on a turn refused at a 5h or 7d limit it reads the window and its reset from the session transcript, finds the setup-token account whose reading carries that reset (else the session's own account, but not within 10 minutes of a switch of the default login, since Claude Code keeps sending the previous token for a while), records that window at 100% until the reset, and runs one `cswap auto --once` tick. A per-model or overage refusal changes nothing.
+
 ## Running alongside Claude Code
 
 Runs safely alongside Claude Code: switches take the same credential locks Claude Code uses, so a swap never collides with a token refresh.

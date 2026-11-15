@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from datetime import datetime
 from pathlib import Path
 
 from claude_swap import __version__, paths, printer
@@ -791,6 +792,52 @@ _BLOCKED_ACCOUNT_ERRORS = frozenset({"oauth_org_not_allowed"})
 _BLOCKED_API_ERROR_CODES = frozenset({"oauth_not_allowed_for_organization"})
 # Set on the probe's `claude`, so its own StopFailure cannot re-enter the hook.
 _HOOK_PROBE_ENV = "CSWAP_HOOK_PROBE"
+_RATE_LIMIT_ERROR = "rate_limit"
+# Account-wide windows; a per-model or overage refusal leaves the account usable.
+_RATE_LIMIT_WINDOWS = frozenset({"five_hour", "seven_day"})
+_TRANSCRIPT_TAIL_BYTES = 1 << 18
+
+
+def _rate_limit_refusal(transcript_path: object) -> tuple[str, float, float] | None:
+    """``(window, resets_at, failed_at)`` of the refusal that ended the turn.
+
+    The StopFailure payload only says ``rate_limit``. The turn's error message
+    in the session transcript, already written when the hook runs, carries
+    ``quotaLimits: {status, rateLimitType, resetsAt}`` (Claude Code 2.1.325).
+    """
+    if not isinstance(transcript_path, str) or not transcript_path:
+        return None
+    try:
+        with open(transcript_path, "rb") as f:
+            f.seek(max(0, os.fstat(f.fileno()).st_size - _TRANSCRIPT_TAIL_BYTES))
+            lines = f.read().decode("utf-8", "replace").splitlines()
+    except OSError:
+        return None
+    for line in reversed(lines):
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(record, dict) or record.get("type") != "assistant":
+            continue
+        limits = record.get("quotaLimits")
+        if record.get("error") != _RATE_LIMIT_ERROR or not isinstance(limits, dict):
+            return None
+        resets_at = limits.get("resetsAt")
+        try:
+            failed_at = datetime.fromisoformat(record["timestamp"]).timestamp()
+        except (KeyError, TypeError, ValueError):
+            return None
+        if (
+            limits.get("status") != "rejected"
+            or limits.get("rateLimitType") not in _RATE_LIMIT_WINDOWS
+            or isinstance(resets_at, bool)
+            or not isinstance(resets_at, (int, float))
+            or not math.isfinite(resets_at)
+        ):
+            return None
+        return limits["rateLimitType"], float(resets_at), failed_at
+    return None
 
 
 def _default_login_blocked() -> bool:
@@ -828,7 +875,11 @@ def _hook_command(argv: list[str]) -> None:
 
     Reads the hook payload on stdin. When the failed turn ran on an account
     its org has blocked, that account is disabled and, if it is the active
-    login, rotated away from. Any other error, or a session on a profile cswap
+    login, rotated away from. When a setup-token account's 5h or 7d limit
+    refused it, that window's statusline reading is set to 100% until the
+    reset (``switcher.mark_limit_reached``) and one `cswap auto --once` tick
+    decides the switch: a session with no statusline never records the usage
+    that filled the window. Any other error, or a session on a profile cswap
     does not manage, is a silent no-op.
 
     A `cswap run` profile names its slot exactly. The default profile only
@@ -841,7 +892,9 @@ def _hook_command(argv: list[str]) -> None:
         description=(
             "Entry points for Claude Code hooks. stop-failure disables the "
             "account a failed turn ran on when its org has blocked Claude "
-            "Code access, and switches away if it is the active login."
+            "Code access, and switches away if it is the active login. On a "
+            "setup-token account's 5h/7d limit it records that window as full "
+            "until its reset and runs one auto-switch tick."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
@@ -862,7 +915,8 @@ Register in Claude Code settings.json:
         payload = json.load(sys.stdin)
     except (OSError, ValueError):
         return
-    if not isinstance(payload, dict) or payload.get("error") not in _BLOCKED_ACCOUNT_ERRORS:
+    kind = payload.get("error") if isinstance(payload, dict) else None
+    if kind not in _BLOCKED_ACCOUNT_ERRORS and kind != _RATE_LIMIT_ERROR:
         return
     # The failed request authenticated with an env token, not a cswap slot.
     if any(os.environ.get(var) for var in AUTH_OVERRIDE_ENV_VARS):
@@ -874,16 +928,23 @@ Register in Claude Code settings.json:
     try:
         switcher = ClaudeAccountSwitcher(debug=args.debug)
         _guard_root(switcher)
-        if config_dir and (
+        profile = bool(config_dir) and (
             Path(config_dir).expanduser().resolve()
             != paths.get_default_claude_config_home().resolve()
-        ):
+        )
+        if profile:
             account_num = switcher.account_for_session_dir(config_dir)
         else:
             account_num = switcher.current_account_number()
-            if account_num is not None and not _default_login_blocked():
-                return
-        if account_num is None:
+        if kind == _RATE_LIMIT_ERROR:
+            refusal = _rate_limit_refusal(payload.get("transcript_path"))
+            if refusal is not None and switcher.mark_limit_reached(
+                *refusal, session_slot=account_num, session_may_lag=not profile
+            ):
+                with contextlib.suppress(SystemExit):
+                    _auto_command(["--once"])
+            return
+        if account_num is None or (not profile and not _default_login_blocked()):
             return
 
         warning(

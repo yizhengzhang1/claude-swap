@@ -140,6 +140,12 @@ _FETCH_STAGGER_S = 0.25
 # on the 5h *and* the 7d boundary to within that same slack.
 _LOCKSTEP_RESET_TOLERANCE_S = 5.0
 
+# After a switch, Claude Code keeps sending the switched-away token for a
+# while (statusline_usage_cache.js measured it keeping the old account's
+# limits until the new account answers). A refusal this soon after the
+# default login changed may belong to the previous account.
+_SWITCH_LAG_S = 600.0
+
 # Show a "· Xm ago" age note on displayed usage older than this. Inside the
 # serve TTL the data is current by design (that is the polling cadence), so
 # an age note there would be permanent noise.
@@ -1811,6 +1817,56 @@ class ClaudeAccountSwitcher:
             self._store.delete_previous_backup(target, email)
 
         self._logger.info(f"Moved slot: {num_src} ({email}) -> {target}")
+
+    def mark_limit_reached(
+        self,
+        window: str,
+        resets_at: float,
+        failed_at: float,
+        session_slot: str | None,
+        session_may_lag: bool,
+    ) -> str | None:
+        """Set a setup-token account's refused window to 100% until its reset.
+
+        A refusal names its window and reset, not its account. The account is
+        the one setup-token slot whose statusline reading carries that same
+        reset for that window. With none, it is ``session_slot``, unless
+        ``session_may_lag`` and the sequence changed within ``_SWITCH_LAG_S``
+        before the refusal. Returns the slot marked, or None.
+        """
+        from datetime import datetime
+
+        tokens = {}
+        for info in self._build_accounts_info():
+            token = oauth.extract_access_token(info[5])
+            if token and self._is_statusline_slot(info):
+                tokens[str(info[0])] = token
+        matches = [
+            num for num, token in tokens.items()
+            if statusline_usage.window_resets_at(token, window) == resets_at
+        ]
+        if len(matches) > 1:
+            return None
+        if matches:
+            num = matches[0]
+        elif session_slot in tokens:
+            num = session_slot
+            if session_may_lag:
+                updated = (self._get_sequence_data() or {}).get("lastUpdated")
+                try:
+                    changed_at = datetime.fromisoformat(updated).timestamp()
+                except (TypeError, ValueError):
+                    return None
+                if changed_at >= failed_at - _SWITCH_LAG_S:
+                    return None
+        else:
+            return None
+        statusline_usage.mark_window_full(tokens[num], window, resets_at, time.time())
+        self._logger.info(
+            f"Account-{num}: {window} limit reached, usage recorded as 100% "
+            f"until {datetime.fromtimestamp(resets_at).isoformat(timespec='minutes')}"
+        )
+        return num
 
     def account_for_session_dir(self, config_dir: str | Path) -> str | None:
         """Slot whose ``cswap run`` profile is ``config_dir``; ``None`` if none is."""

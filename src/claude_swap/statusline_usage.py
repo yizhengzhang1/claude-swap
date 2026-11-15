@@ -4,8 +4,10 @@ A setup-token (``claude setup-token``) carries only the ``user:inference``
 scope, so the usage endpoint refuses it. Claude Code still hands the
 account's rate limits to its statusline command on every render; a
 statusline script records them per token, and this module reads that record
-back. cswap only ever reads the cache: the directory, its permissions and
-its pruning belong to the writer.
+back. The directory, its permissions and its pruning belong to the writer.
+cswap writes one thing there: a window a turn was refused on, set to 100%
+until its reset (:func:`mark_window_full`), because a session that renders
+no statusline (``claude -p``) never records the usage that filled it.
 
 The contract, shared with the writer:
 
@@ -35,7 +37,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from claude_swap import oauth
+from claude_swap import fsutil, oauth
 from claude_swap.json_output import USAGE_STATUSLINE_PENDING
 from claude_swap.usage_store import STATUSLINE_SOURCE, UsageEntry
 
@@ -164,16 +166,53 @@ def parse_reading(body: object, now: float) -> StatuslineReading:
     )
 
 
+def _read_body(access_token: str) -> dict | None:
+    try:
+        body = json.loads(cache_path(access_token).read_text(encoding="utf-8"))
+    except (OSError, ValueError, RecursionError):
+        return None
+    if (
+        not isinstance(body, dict)
+        or body.get("schema") != _SCHEMA
+        or body.get("source") != _BODY_SOURCE
+    ):
+        return None
+    return body
+
+
 def read_reading(credentials: str, now: float) -> StatuslineReading:
     """The cached reading for a credential's access token. Never raises."""
     token = oauth.extract_access_token(credentials) if credentials else None
     if not isinstance(token, str) or not token:
         return _NO_READING
-    try:
-        body = json.loads(cache_path(token).read_text(encoding="utf-8"))
-    except (OSError, ValueError, RecursionError):
-        return _NO_READING
-    return parse_reading(body, now)
+    body = _read_body(token)
+    return _NO_READING if body is None else parse_reading(body, now)
+
+
+def window_resets_at(access_token: str, key: str) -> float | None:
+    """The reset the cache records for one window of a token, as written."""
+    body = _read_body(access_token)
+    window = body.get(key) if body else None
+    resets_at = window.get("resets_at") if isinstance(window, dict) else None
+    return float(resets_at) if _finite(resets_at) else None
+
+
+def mark_window_full(access_token: str, key: str, resets_at: float, now: float) -> None:
+    """Record window ``key`` of a token at 100% until ``resets_at``.
+
+    The other window keeps its last reading. ``captured_at`` moves to now: the
+    reader drops a reset further than one window past the capture. The next
+    statusline render with a new response replaces the whole body, and the
+    reader rolls the window to 0% once the reset passes.
+    """
+    body = _read_body(access_token) or {
+        "schema": _SCHEMA, "source": _BODY_SOURCE, "five_hour": None, "seven_day": None,
+    }
+    body[key] = {"used_percentage": 100, "resets_at": resets_at}
+    body["captured_at"] = now
+    path = cache_path(access_token)
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    fsutil.atomic_write_text(path, json.dumps(body))
 
 
 def usage_entry(credentials: str, now: float) -> UsageEntry:
